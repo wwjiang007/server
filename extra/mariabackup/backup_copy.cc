@@ -1361,6 +1361,8 @@ out:
 	return(ret);
 }
 
+extern void copy_tablespaces_created_during_backup();
+
 /** Start --backup */
 bool backup_start()
 {
@@ -1381,6 +1383,8 @@ bool backup_start()
 			return(false);
 		}
 	}
+
+	copy_tablespaces_created_during_backup();
 
 	if (!backup_files(fil_path_to_mysql_datadir, false)) {
 		return(false);

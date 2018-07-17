@@ -2824,6 +2824,7 @@ xb_new_datafile(const char *name, bool is_remote)
 	}
 }
 
+static std::set<std::string> xb_loaded_tablespaces;
 
 static
 void
@@ -2863,6 +2864,10 @@ xb_load_single_table_tablespace(
 		name[pathlen - 5] = 0;
 	}
 
+	/* Prevent second load of the same tablespace. */
+	if (xb_loaded_tablespaces.find(name) != xb_loaded_tablespaces.end())
+		return;
+
 	Datafile *file = xb_new_datafile(name, is_remote);
 
 	if (file->open_read_only(true) != DB_SUCCESS) {
@@ -2894,7 +2899,7 @@ xb_load_single_table_tablespace(
 		/* by opening the tablespace we forcing node and space objects
 		in the cache to be populated with fields from space header */
 		fil_space_open(space->name);
-
+		xb_loaded_tablespaces.insert(name);
 		if (srv_operation == SRV_OPERATION_RESTORE_DELTA
 		    || xb_close_files) {
 			fil_space_close(space->name);
@@ -3210,6 +3215,7 @@ xb_data_files_close()
 	if (buf_dblwr) {
 		buf_dblwr_free();
 	}
+	xb_loaded_tablespaces.clear();
 }
 
 /***********************************************************************
@@ -4155,6 +4161,10 @@ fail_before_log_copying_thread_start:
 		goto fail;
 	}
 
+	DBUG_EXECUTE_IF("create_table_during_backup",
+		xb_mysql_query(mysql_connection, "CREATE TABLE test.during_backup(i int) ENGINE=INNODB",
+			false, true););
+
 	/* Create data copying threads */
 	data_threads = (data_thread_ctxt_t *)
 		malloc(sizeof(data_thread_ctxt_t) * xtrabackup_parallel);
@@ -4229,6 +4239,33 @@ fail_before_log_copying_thread_start:
 
 	innodb_shutdown();
 	return(true);
+}
+
+/* This function copies tablespaces for tables created during backup. */
+void copy_tablespaces_created_during_backup()
+{
+	std::set<std::string> spaces_before_backup = xb_loaded_tablespaces;
+
+	/* Rescan datadir, load tablespaces that were created during backup
+	*/
+	dberr_t err = enumerate_ibd_files(xb_load_single_table_tablespace);
+	datafiles_iter_t *it = datafiles_iter_new(fil_system);
+	if (!it)
+		return;
+
+	while (fil_node_t *node = datafiles_iter_next(it)) {
+		fil_space_t *space = node->space;
+		if (fil_is_user_tablespace_id(space->id)
+			&& !check_if_skip_table(space->name)
+			&& spaces_before_backup.find(space->name) == spaces_before_backup.end()) {
+
+			if (xtrabackup_copy_datafile(node, 0)) {
+				msg("mariabackup: Error: failed to copy datafile.\n");
+				exit(EXIT_FAILURE);
+			}
+		}
+	}
+	datafiles_iter_free(it);
 }
 
 /* ================= prepare ================= */

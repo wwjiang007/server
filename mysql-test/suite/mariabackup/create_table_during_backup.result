@@ -1,0 +1,6 @@
+# xtrabackup prepare
+# shutdown server
+# remove datadir
+# xtrabackup move back
+# restart server
+DROP TABLE during_backup;
