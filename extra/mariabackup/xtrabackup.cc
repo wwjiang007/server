@@ -538,10 +538,6 @@ void mdl_lock_all()
 	}
 	datafiles_iter_free(it);
 
-	DBUG_EXECUTE_IF("check_mdl_lock_works",
-		dbug_alter_thread_done =
-		  dbug_start_query_thread("ALTER TABLE test.t ADD COLUMN mdl_lock_column int",
-			 "Waiting for table metadata lock",1, ER_QUERY_INTERRUPTED););
 }
 
 /** Check if the space id belongs to the table which name should
@@ -4105,6 +4101,12 @@ reread_log_header:
 	}
 
 	/* Populate fil_system with tablespaces to copy */
+	if (opt_lock_ddl_per_table)
+	{
+		msg("Executing 'FLUSH TABLES WITH READ LOCK' before MDL locks");
+		xb_mysql_query(mysql_connection, "/*mdl_lock_all*/ FLUSH TABLES WITH READ LOCK", false, true);
+	}
+
 	err = xb_load_tablespaces();
 	if (err != DB_SUCCESS) {
 		msg("mariabackup: error: xb_load_tablespaces() failed with"
@@ -4153,6 +4155,13 @@ fail_before_log_copying_thread_start:
 
 	if (opt_lock_ddl_per_table) {
 		mdl_lock_all();
+		msg("Execute 'UNLOCK TABLES' after MDL locks");
+		xb_mysql_query(mysql_connection, "UNLOCK TABLES", false, true);
+
+		DBUG_EXECUTE_IF("check_mdl_lock_works",
+			dbug_alter_thread_done =
+			dbug_start_query_thread("ALTER TABLE test.t ADD COLUMN mdl_lock_column int",
+				"Waiting for table metadata lock", 1, ER_QUERY_INTERRUPTED););
 	}
 
 	it = datafiles_iter_new(fil_system);
@@ -4246,8 +4255,7 @@ void copy_tablespaces_created_during_backup()
 {
 	std::set<std::string> spaces_before_backup = xb_loaded_tablespaces;
 
-	/* Rescan datadir, load tablespaces that were created during backup
-	*/
+	/* Rescan datadir, load tablespaces that were created during backup.*/
 	dberr_t err = enumerate_ibd_files(xb_load_single_table_tablespace);
 	datafiles_iter_t *it = datafiles_iter_new(fil_system);
 	if (!it)
