@@ -201,7 +201,7 @@ xb_fil_cur_open(
 
 		xb_fil_cur_close(cursor);
 
-		return(XB_FIL_CUR_ERROR);
+		return(XB_FIL_CUR_SKIP);
 	}
 
 	if (srv_file_flush_method == SRV_O_DIRECT
