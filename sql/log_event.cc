@@ -9696,6 +9696,10 @@ int Table_map_log_event::do_apply_event(Relay_log_info const *rli)
 
   strmov(db_mem, rpl_filter->get_rewrite_db(m_dbnam, &dummy_len));
   strmov(tname_mem, m_tblnam);
+  if (lower_case_table_names)
+  {
+    my_casedn_str(files_charset_info, (char*)tname_mem);
+  }
 
   table_list->init_one_table(db_mem, strlen(db_mem),
                              tname_mem, strlen(tname_mem),
