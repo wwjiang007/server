@@ -1,8 +1,10 @@
 --source include/have_debug.inc
-let $targetdir=$MYSQLTEST_VARDIR/backup;
-mkdir $targetdir;
-CREATE TABLE t1(i int) ENGINE INNODB;
-exec  $XTRABACKUP --defaults-file=$MYSQLTEST_VARDIR/my.cnf  --backup  --target-dir=$targetdir  --lock-ddl-per-table --dbug=+d,rename_during_mdl_lock_table;
+let $targetdir=$MYSQLTEST_VARDIR/tmp/backup;
+CREATE TABLE t1(i int);
+INSERT INTO t1 VALUES(1);
+--disable_result_log
+exec $XTRABACKUP --defaults-file=$MYSQLTEST_VARDIR/my.cnf --backup --target-dir=$targetdir --dbug=+d,rename_table_during_backup;
+--enable_result_log
 
 echo # xtrabackup prepare;
 --disable_result_log
@@ -18,4 +20,3 @@ SELECT * from t2;
 DROP TABLE t2;
 
 rmdir $targetdir;
-

@@ -343,6 +343,8 @@ const char *opt_history = NULL;
 char mariabackup_exe[FN_REFLEN];
 char orig_argv1[FN_REFLEN];
 
+std::set<std::string> tablespaces_in_backup;
+
 /* Whether xtrabackup_binlog_info should be created on recovery */
 static bool recover_binlog_info;
 
@@ -530,11 +532,20 @@ void mdl_lock_all()
 		return;
 
 	while (fil_node_t *node = datafiles_iter_next(it)){
-		if (fil_is_user_tablespace_id(node->space->id)
-			&& check_if_skip_table(node->space->name))
+		const char *name = node->space->name;
+		ulint id = node->space->id;
+
+		if (id == TRX_SYS_SPACE)
 			continue;
 
-		mdl_lock_table(node->space->id);
+		if (fil_is_user_tablespace_id(id)
+			&& check_if_skip_table(name))
+			continue;
+
+		if (!mdl_lock_table(id)) {
+			fil_space_close(name);
+			fil_space_free(id, false);
+		}
 	}
 	datafiles_iter_free(it);
 
@@ -2427,6 +2438,8 @@ xtrabackup_copy_datafile(fil_node_t* node, uint thread_n)
 		goto error;
 	}
 
+	tablespaces_in_backup.insert(node_name);
+
 	/* close */
 	msg_ts("[%02u]        ...done\n", thread_n);
 	xb_fil_cur_close(&cursor);
@@ -2458,6 +2471,8 @@ skip:
 	if (write_filter && write_filter->deinit) {
 		write_filter->deinit(&write_filt_ctxt);
 	}
+	fil_space_close(node->space->name);
+	fil_space_free(node->space->id, false);
 	msg("[%02u] mariabackup: Warning: We assume the "
 	    "table was dropped during xtrabackup execution "
 	    "and ignore the file.\n", thread_n);
@@ -2690,6 +2705,13 @@ data_copy_thread_func(
 			    "failed to copy datafile.\n", num);
 			exit(EXIT_FAILURE);
 		}
+
+		DBUG_EXECUTE_IF("recreate_table_during_backup",
+			if (strcmp(node->space->name, "test/t1") == 0) {
+				xb_mysql_query(mysql_connection, "DROP TABLE test.t1", false);
+				xb_mysql_query(mysql_connection, "CREATE TABLE test.t1(x int) ENGINE=Innodb", false);
+				xb_mysql_query(mysql_connection, "INSERT INTO test.t1 VALUES(2)", false);
+			});
 	}
 
 	pthread_mutex_lock(&ctxt->count_mutex);
@@ -2820,8 +2842,6 @@ xb_new_datafile(const char *name, bool is_remote)
 	}
 }
 
-static std::set<std::string> xb_loaded_tablespaces;
-
 static
 void
 xb_load_single_table_tablespace(
@@ -2861,8 +2881,12 @@ xb_load_single_table_tablespace(
 	}
 
 	/* Prevent second load of the same tablespace. */
-	if (xb_loaded_tablespaces.find(name) != xb_loaded_tablespaces.end())
+	mutex_enter(&fil_system->mutex);
+	fil_space_t *s = fil_space_get_by_name(name);
+	mutex_exit(&fil_system->mutex);
+	if (s) {
 		return;
+	}
 
 	Datafile *file = xb_new_datafile(name, is_remote);
 
@@ -2895,7 +2919,7 @@ xb_load_single_table_tablespace(
 		/* by opening the tablespace we forcing node and space objects
 		in the cache to be populated with fields from space header */
 		fil_space_open(space->name);
-		xb_loaded_tablespaces.insert(name);
+
 		if (srv_operation == SRV_OPERATION_RESTORE_DELTA
 		    || xb_close_files) {
 			fil_space_close(space->name);
@@ -3211,7 +3235,6 @@ xb_data_files_close()
 	if (buf_dblwr) {
 		buf_dblwr_free();
 	}
-	xb_loaded_tablespaces.clear();
 }
 
 /***********************************************************************
@@ -4100,14 +4123,9 @@ reread_log_header:
 				 &io_watching_thread_id);
 	}
 
-	/* Populate fil_system with tablespaces to copy */
-	if (opt_lock_ddl_per_table)
-	{
-		msg("Executing 'FLUSH TABLES WITH READ LOCK' before MDL locks");
-		xb_mysql_query(mysql_connection, "/*mdl_lock_all*/ FLUSH TABLES WITH READ LOCK", false, true);
-	}
-
 	err = xb_load_tablespaces();
+
+
 	if (err != DB_SUCCESS) {
 		msg("mariabackup: error: xb_load_tablespaces() failed with"
 		    " error %s.\n", ut_strerr(err));
@@ -4154,9 +4172,7 @@ fail_before_log_copying_thread_start:
 	}
 
 	if (opt_lock_ddl_per_table) {
-		mdl_lock_all();
-		msg("Execute 'UNLOCK TABLES' after MDL locks");
-		xb_mysql_query(mysql_connection, "UNLOCK TABLES", false, true);
+		 mdl_lock_all();
 
 		DBUG_EXECUTE_IF("check_mdl_lock_works",
 			dbug_alter_thread_done =
@@ -4171,8 +4187,13 @@ fail_before_log_copying_thread_start:
 	}
 
 	DBUG_EXECUTE_IF("create_table_during_backup",
-		xb_mysql_query(mysql_connection, "CREATE TABLE test.during_backup(i int) ENGINE=INNODB",
-			false, true););
+		xb_mysql_query(mysql_connection, 
+			"CREATE TABLE test.during_backup(i int) ENGINE=INNODB", false););
+	DBUG_EXECUTE_IF("drop_table_during_backup",
+		xb_mysql_query(mysql_connection, "DROP TABLE test.t1", false););
+	DBUG_EXECUTE_IF("rename_table_during_backup",
+		xb_mysql_query(mysql_connection, "RENAME TABLE test.t1 to test.t2", false););
+
 
 	/* Create data copying threads */
 	data_threads = (data_thread_ctxt_t *)
@@ -4253,8 +4274,6 @@ fail_before_log_copying_thread_start:
 /* This function copies tablespaces for tables created during backup. */
 void copy_tablespaces_created_during_backup()
 {
-	std::set<std::string> spaces_before_backup = xb_loaded_tablespaces;
-
 	/* Rescan datadir, load tablespaces that were created during backup.*/
 	dberr_t err = enumerate_ibd_files(xb_load_single_table_tablespace);
 	datafiles_iter_t *it = datafiles_iter_new(fil_system);
@@ -4265,7 +4284,7 @@ void copy_tablespaces_created_during_backup()
 		fil_space_t *space = node->space;
 		if (fil_is_user_tablespace_id(space->id)
 			&& !check_if_skip_table(space->name)
-			&& spaces_before_backup.find(space->name) == spaces_before_backup.end()) {
+			&& tablespaces_in_backup.find(space->name) == tablespaces_in_backup.end()){
 
 			if (xtrabackup_copy_datafile(node, 0)) {
 				msg("mariabackup: Error: failed to copy datafile.\n");

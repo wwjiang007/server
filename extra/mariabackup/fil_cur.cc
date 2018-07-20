@@ -374,7 +374,9 @@ xb_fil_cur_close(
 /*=============*/
 	xb_fil_cur_t *cursor)	/*!< in/out: source file cursor */
 {
-	cursor->read_filter->deinit(&cursor->read_filter_ctxt);
+	if (cursor->read_filter) {
+		cursor->read_filter->deinit(&cursor->read_filter_ctxt);
+	}
 
 	free(cursor->orig_buf);
 

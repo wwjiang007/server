@@ -57,7 +57,7 @@ struct xb_fil_cur_t {
 	ulint		space_size;	/*!< space size in pages */
 
 	/** TODO: remove this default constructor */
-	xb_fil_cur_t() : page_size(0), read_filter_ctxt() {}
+	xb_fil_cur_t() : page_size(0), read_filter_ctxt(), read_filter(0) {}
 
 	/** @return whether this is not a file-per-table tablespace */
 	bool is_system() const
