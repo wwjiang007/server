@@ -138,7 +138,7 @@ xb_fil_cur_open(
 	uint		thread_n)	/*!< thread number for diagnostics */
 {
 	bool	success;
-
+	int err;
 	/* Initialize these first so xb_fil_cur_close() handles them correctly
 	in case of error */
 	cursor->orig_buf = NULL;
@@ -155,6 +155,13 @@ xb_fil_cur_open(
 	strncpy(cursor->rel_path,
 		xb_get_relative_path(cursor->abs_path, cursor->is_system()),
 		sizeof(cursor->rel_path));
+
+	if (access(cursor->abs_path, R_OK)) {
+		msg("[%02u] mariabackup: warning: "
+			"tablespace %s is not readable \n",
+			thread_n, cursor->abs_path);
+		return(XB_FIL_CUR_SKIP);
+	}
 
 	/* In the backup mode we should already have a tablespace handle created
 	by fil_ibd_load() unless it is a system
@@ -173,7 +180,7 @@ xb_fil_cur_open(
 			    "tablespace %s\n",
 			    thread_n, cursor->abs_path);
 
-			return(XB_FIL_CUR_ERROR);
+			return(XB_FIL_CUR_SKIP);
 		}
 		mutex_enter(&fil_system->mutex);
 
@@ -194,9 +201,23 @@ xb_fil_cur_open(
 
 	cursor->node = node;
 	cursor->file = node->handle;
-
-	if (stat(cursor->abs_path, &cursor->statinfo)) {
-		msg("[%02u] mariabackup: error: cannot stat %s\n",
+#ifdef _WIN32
+    HANDLE hDup;
+    DuplicateHandle(GetCurrentProcess(),cursor->file.m_file,
+		GetCurrentProcess(), &hDup, 0, FALSE, DUPLICATE_SAME_ACCESS);
+	int filenr = _open_osfhandle((intptr_t)hDup, 0);
+	if (filenr < 0) {
+		err = EINVAL;
+	}
+	else {
+		err = _fstat64(filenr, &cursor->statinfo);
+		close(filenr);
+	}
+#else
+	err = fstat(cursor->file.m_file, &cursor->statinfo);
+#endif
+	if (err) {
+		msg("[%02u] mariabackup: error: cannot fstat %s\n",
 		    thread_n, cursor->abs_path);
 
 		xb_fil_cur_close(cursor);
