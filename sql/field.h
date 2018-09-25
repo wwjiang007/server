@@ -2295,7 +2295,6 @@ public:
   {
     return unpack_int64(to, from, from_end);
   }
-
   void set_max();
   bool is_max();
 };

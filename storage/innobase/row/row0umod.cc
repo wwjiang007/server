@@ -1182,8 +1182,8 @@ row_undo_mod_parse_undo_rec(
 close_table:
 		/* Normally, tables should not disappear or become
 		unaccessible during ROLLBACK, because they should be
-		protected by InnoDB table locks. TRUNCATE TABLE
-		or table corruption could be valid exceptions.
+		protected by InnoDB table locks. Corruption could be
+		a valid exception.
 
 		FIXME: When running out of temporary tablespace, it
 		would probably be better to just drop all temporary
@@ -1211,16 +1211,15 @@ close_table:
 
 	if (node->update->info_bits & REC_INFO_MIN_REC_FLAG) {
 		/* This must be an undo log record for a subsequent
-		instant ADD COLUMN on a table, extending the
-		'default value' record. */
+		instant ALTER TABLE, extending the metadata record. */
 		ut_ad(clust_index->is_instant());
 		if (node->update->info_bits != REC_INFO_MIN_REC_FLAG) {
 			ut_ad(!"wrong info_bits in undo log record");
 			goto close_table;
 		}
-		node->update->info_bits = REC_INFO_DEFAULT_ROW;
+		node->update->info_bits = REC_INFO_METADATA;
 		const_cast<dtuple_t*>(node->ref)->info_bits
-			= REC_INFO_DEFAULT_ROW;
+			= REC_INFO_METADATA;
 	}
 
 	if (!row_undo_search_clust_to_pcur(node)) {
@@ -1297,7 +1296,7 @@ row_undo_mod(
 	ut_ad(dict_index_is_clust(node->index));
 
 	if (node->ref->info_bits) {
-		ut_ad(node->ref->info_bits == REC_INFO_DEFAULT_ROW);
+		ut_ad(node->ref->info_bits == REC_INFO_METADATA);
 		goto rollback_clust;
 	}
 
@@ -1351,7 +1350,8 @@ rollback_clust:
 			already be holding dict_sys->mutex, which
 			would be acquired when updating statistics. */
 			if (update_statistics && !dict_locked) {
-				dict_stats_update_if_needed(node->table);
+				dict_stats_update_if_needed(
+					node->table, node->trx->mysql_thd);
 			} else {
 				node->table->stat_modified_counter++;
 			}

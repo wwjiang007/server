@@ -2,7 +2,7 @@
 #define HANDLER_INCLUDED
 /*
    Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2017, MariaDB Corporation.
+   Copyright (c) 2009, 2018, MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -818,7 +818,7 @@ struct xid_t {
     bqual_length= b;
     memcpy(data, d, g+b);
   }
-  bool is_null() { return formatID == -1; }
+  bool is_null() const { return formatID == -1; }
   void null() { formatID= -1; }
   my_xid quick_get_my_xid()
   {
@@ -950,6 +950,7 @@ enum enum_schema_tables
   SCH_ALL_PLUGINS,
   SCH_APPLICABLE_ROLES,
   SCH_CHARSETS,
+  SCH_CHECK_CONSTRAINTS,
   SCH_COLLATIONS,
   SCH_COLLATION_CHARACTER_SET_APPLICABILITY,
   SCH_COLUMNS,
@@ -3096,7 +3097,7 @@ public:
   bool keyread_enabled() { return keyread < MAX_KEY; }
   int ha_start_keyread(uint idx)
   {
-    int res= keyread_enabled() ? 0 : extra(HA_EXTRA_KEYREAD);
+    int res= keyread_enabled() ? 0 : extra_opt(HA_EXTRA_KEYREAD, idx);
     keyread= idx;
     return res;
   }
@@ -3608,7 +3609,7 @@ public:
   { return 0; }
   virtual int extra(enum ha_extra_function operation)
   { return 0; }
-  virtual int extra_opt(enum ha_extra_function operation, ulong cache_size)
+  virtual int extra_opt(enum ha_extra_function operation, ulong arg)
   { return extra(operation); }
 
   /**
@@ -4829,5 +4830,5 @@ void print_keydup_error(TABLE *table, KEY *key, const char *msg, myf errflag);
 void print_keydup_error(TABLE *table, KEY *key, myf errflag);
 
 int del_global_index_stat(THD *thd, TABLE* table, KEY* key_info);
-int del_global_table_stat(THD *thd, LEX_CSTRING *db, LEX_CSTRING *table);
+int del_global_table_stat(THD *thd, const  LEX_CSTRING *db, const LEX_CSTRING *table);
 #endif /* HANDLER_INCLUDED */

@@ -471,6 +471,10 @@ bool check_has_super(sys_var *self, THD *thd, set_var *var)
   return false;
 }
 
+static Sys_var_bit Sys_core_file("core_file", "write a core-file on crashes",
+          READ_ONLY GLOBAL_VAR(test_flags), NO_CMD_LINE,
+          TEST_CORE_ON_SIGNAL, DEFAULT(FALSE), NO_MUTEX_GUARD, NOT_IN_BINLOG,
+          0,0,0);
 
 static bool binlog_format_check(sys_var *self, THD *thd, set_var *var)
 {
@@ -2666,6 +2670,16 @@ static Sys_var_ulong Sys_div_precincrement(
        "operator will be increased on that value",
        SESSION_VAR(div_precincrement), CMD_LINE(REQUIRED_ARG),
        VALID_RANGE(0, DECIMAL_MAX_SCALE), DEFAULT(4), BLOCK_SIZE(1));
+
+static Sys_var_uint Sys_eq_range_index_dive_limit(
+       "eq_range_index_dive_limit",
+       "The optimizer will use existing index statistics instead of "
+       "doing index dives for equality ranges if the number of equality "
+       "ranges for the index is larger than or equal to this number. "
+       "If set to 0, index dives are always used.",
+       SESSION_VAR(eq_range_index_dive_limit), CMD_LINE(REQUIRED_ARG),
+       VALID_RANGE(0, UINT_MAX32), DEFAULT(0),
+       BLOCK_SIZE(1));
 
 static Sys_var_ulong Sys_range_alloc_block_size(
        "range_alloc_block_size",
