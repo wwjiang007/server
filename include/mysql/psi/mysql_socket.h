@@ -14,7 +14,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
-02110-1301  USA
+02110-1335  USA
 */
 
 #ifndef MYSQL_SOCKET_H
@@ -735,7 +735,7 @@ inline_mysql_socket_send
  MYSQL_SOCKET mysql_socket, const SOCKBUF_T *buf, size_t n, int flags)
 {
   ssize_t result;
-
+  DBUG_ASSERT(mysql_socket.fd != INVALID_SOCKET);
 #ifdef HAVE_PSI_SOCKET_INTERFACE
   if (psi_likely(mysql_socket.m_psi != NULL))
   {
@@ -776,7 +776,7 @@ inline_mysql_socket_recv
  MYSQL_SOCKET mysql_socket,  SOCKBUF_T *buf, size_t n, int flags)
 {
   ssize_t result;
-
+  DBUG_ASSERT(mysql_socket.fd != INVALID_SOCKET);
 #ifdef HAVE_PSI_SOCKET_INTERFACE
   if (psi_likely(mysql_socket.m_psi != NULL))
   {

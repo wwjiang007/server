@@ -2,7 +2,7 @@
 #define SQL_ITEM_INCLUDED
 
 /* Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2018, MariaDB Corporation
+   Copyright (c) 2009, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -15,7 +15,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 
 #ifdef USE_PRAGMA_INTERFACE
@@ -28,6 +28,7 @@
 #include "field.h"                              /* Derivation */
 #include "sql_type.h"
 #include "sql_time.h"
+#include "mem_root_array.h"
 
 C_MODE_START
 #include <ma_dyncol.h>
@@ -146,6 +147,7 @@ bool mark_unsupported_function(const char *w1, const char *w2,
 
 #define NO_EXTRACTION_FL              (1 << 6)
 #define FULL_EXTRACTION_FL            (1 << 7)
+#define SUBSTITUTION_FL               (1 << 8)
 #define EXTRACTION_MASK               (NO_EXTRACTION_FL | FULL_EXTRACTION_FL)
 
 extern const char *item_empty_name;
@@ -518,7 +520,7 @@ class Rewritable_query_parameter
     Value of 0 means that this object doesn't have to be replaced
     (for example SP variables in control statements)
   */
-  uint pos_in_query;
+  my_ptrdiff_t pos_in_query;
 
   /*
     Byte length of parameter name in the statement.  This is not
@@ -630,7 +632,6 @@ public:
 class Item: public Value_source,
             public Type_all_attributes
 {
-  void operator=(Item &);
   /**
     The index in the JOIN::join_tab array of the JOIN_TAB this Item is attached
     to. Items are attached (or 'pushed') to JOIN_TABs during optimization by the
@@ -1027,6 +1028,10 @@ public:
       If value is not null null_value flag will be reset to FALSE.
   */
   virtual longlong val_int()=0;
+  Longlong_hybrid to_longlong_hybrid()
+  {
+    return Longlong_hybrid(val_int(), unsigned_flag);
+  }
   /**
     Get a value for CAST(x AS SIGNED).
     Too large positive unsigned integer values are converted
@@ -1051,25 +1056,18 @@ public:
   longlong val_int_unsigned_typecast_from_decimal();
   longlong val_int_unsigned_typecast_from_int();
   longlong val_int_unsigned_typecast_from_str();
+
+  /**
+    Get a value for CAST(x AS UNSIGNED).
+    Huge positive unsigned values are converted to negative complements.
+  */
+  longlong val_int_signed_typecast_from_int();
+
   /*
     This is just a shortcut to avoid the cast. You should still use
     unsigned_flag to check the sign of the item.
   */
   inline ulonglong val_uint() { return (ulonglong) val_int(); }
-  /*
-    Adjust the result of val_int() to an unsigned number:
-    - NULL value is converted to 0. The caller can check "null_value"
-      to distinguish between 0 and NULL when necessary.
-    - Negative numbers are converted to 0.
-    - Positive numbers bigger than upper_bound are converted to upper_bound.
-    - Other numbers are returned as is.
-  */
-  ulonglong val_uint_from_val_int(ulonglong upper_bound)
-  {
-    longlong nr= val_int();
-    return (null_value || (nr < 0 && !unsigned_flag)) ? 0 :
-           (ulonglong) nr > upper_bound ? upper_bound : (ulonglong) nr;
-  }
 
   /*
     Return string representation of this item object.
@@ -1216,6 +1214,13 @@ public:
   }
   virtual String *val_nodeset(String*) { return 0; }
 
+  bool eval_const_cond()
+  {
+    DBUG_ASSERT(const_item());
+    DBUG_ASSERT(!is_expensive());
+    return val_bool();
+  }
+
   /*
     save_val() is method of val_* family which stores value in the given
     field.
@@ -1267,6 +1272,7 @@ public:
   virtual const char *full_name() const { return name.str ? name.str : "???"; }
   const char *field_name_or_null()
   { return real_item()->type() == Item::FIELD_ITEM ? name.str : NULL; }
+  const TABLE_SHARE *field_table_or_null();
 
   /*
     *result* family of methods is analog of *val* family (see above) but
@@ -1416,6 +1422,16 @@ public:
                      LOWEST_PRECEDENCE);
   }
   virtual void print(String *str, enum_query_type query_type);
+
+  class Print: public String
+  {
+  public:
+    Print(Item *item, enum_query_type type)
+    {
+      item->print(this, type);
+    }
+  };
+
   void print_item_w_name(String *str, enum_query_type query_type);
   void print_value(String *str);
 
@@ -2206,6 +2222,15 @@ protected:
       if (args[i]->const_item())
         continue;
       if (!args[i]->excl_dep_on_grouping_fields(sel))
+        return false;
+    }
+    return true;
+  }
+  bool eq(const Item_args *other, bool binary_cmp) const
+  {
+    for (uint i= 0; i < arg_count ; i++)
+    {
+      if (!args[i]->eq(other->args[i], binary_cmp))
         return false;
     }
     return true;
@@ -3614,6 +3639,10 @@ public:
   bool check_vcol_func_processor(void *int_arg) {return FALSE;}
   Item *get_copy(THD *thd) { return 0; }
 
+  bool add_as_clone(THD *thd);
+  void sync_clones();
+  bool register_clone(Item_param *i) { return m_clones.push_back(i); }
+
 private:
   void invalid_default_param() const;
 
@@ -3631,6 +3660,12 @@ public:
 private:
   Send_field *m_out_param_info;
   bool m_is_settable_routine_parameter;
+  /*
+    Array of all references of this parameter marker used in a CTE to its clones
+    created for copies of this marker used the CTE's copies. It's used to
+    synchronize the actual value of the parameter with the values of the clones.
+  */
+  Mem_root_array<Item_param *, true> m_clones;
 };
 
 
@@ -5217,6 +5252,7 @@ public:
   void update_used_tables();
   table_map not_null_tables() const;
   bool const_item() const { return used_tables() == 0; }
+  TABLE *get_null_ref_table() const { return null_ref_table; }
   bool walk(Item_processor processor, bool walk_subquery, void *arg)
   { 
     return (*ref)->walk(processor, walk_subquery, arg) ||
@@ -5462,7 +5498,7 @@ public:
   Base class to implement typed value caching Item classes
 
   Item_copy_ classes are very similar to the corresponding Item_
-  classes (e.g. Item_copy_int is similar to Item_int) but they add
+  classes (e.g. Item_copy_string is similar to Item_string) but they add
   the following additional functionality to Item_ :
     1. Nullability
     2. Possibility to store the value not only on instantiation time,
@@ -5509,13 +5545,6 @@ protected:
   }
 
 public:
-  /** 
-    Factory method to create the appropriate subclass dependent on the type of 
-    the original item.
-
-    @param item      the original item.
-  */  
-  static Item_copy *create(THD *thd, Item *item);
 
   /** 
     Update the cache with the value of the original item
@@ -5580,107 +5609,6 @@ public:
   int save_in_field(Field *field, bool no_conversions);
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_copy_string>(thd, this); }
-};
-
-
-class Item_copy_int : public Item_copy
-{
-protected:  
-  longlong cached_value; 
-public:
-  Item_copy_int(THD *thd, Item *i): Item_copy(thd, i) {}
-  int save_in_field(Field *field, bool no_conversions);
-
-  virtual String *val_str(String*);
-  virtual my_decimal *val_decimal(my_decimal *);
-  virtual double val_real()
-  {
-    return null_value ? 0.0 : (double) cached_value;
-  }
-  virtual longlong val_int()
-  {
-    return null_value ? 0 : cached_value;
-  }
-  bool get_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
-  { return get_date_from_int(ltime, fuzzydate); }
-  virtual void copy();
-  Item *get_copy(THD *thd)
-  { return get_item_copy<Item_copy_int>(thd, this); }
-};
-
-
-class Item_copy_uint : public Item_copy_int
-{
-public:
-  Item_copy_uint(THD *thd, Item *item_arg): Item_copy_int(thd, item_arg)
-  {
-    unsigned_flag= 1;
-  }
-
-  String *val_str(String*);
-  double val_real()
-  {
-    return null_value ? 0.0 : (double) (ulonglong) cached_value;
-  }
-  Item *get_copy(THD *thd)
-  { return get_item_copy<Item_copy_uint>(thd, this); }
-};
-
-
-class Item_copy_float : public Item_copy
-{
-protected:  
-  double cached_value; 
-public:
-  Item_copy_float(THD *thd, Item *i): Item_copy(thd, i) {}
-  int save_in_field(Field *field, bool no_conversions);
-
-  String *val_str(String*);
-  my_decimal *val_decimal(my_decimal *);
-  double val_real()
-  {
-    return null_value ? 0.0 : cached_value;
-  }
-  longlong val_int()
-  {
-    return (longlong) rint(val_real());
-  }
-  bool get_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
-  {
-    return get_date_from_real(ltime, fuzzydate);
-  }
-  void copy()
-  {
-    cached_value= item->val_real();
-    null_value= item->null_value;
-  }
-  Item *get_copy(THD *thd)
-  { return get_item_copy<Item_copy_float>(thd, this); }
-};
-
-
-class Item_copy_decimal : public Item_copy
-{
-protected:  
-  my_decimal cached_value;
-public:
-  Item_copy_decimal(THD *thd, Item *i): Item_copy(thd, i) {}
-  int save_in_field(Field *field, bool no_conversions);
-
-  String *val_str(String*);
-  my_decimal *val_decimal(my_decimal *) 
-  { 
-    return null_value ? NULL: &cached_value; 
-  }
-  double val_real();
-  longlong val_int();
-  bool get_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
-  {
-    return get_date_from_decimal(ltime, fuzzydate);
-  }
-  void copy();
-  Item *get_copy(THD *thd)
-  { return get_item_copy<Item_copy_decimal>(thd, this); }
 };
 
 
@@ -5828,6 +5756,11 @@ public:
     return false;
   }
   table_map used_tables() const;
+  virtual void update_used_tables()
+  {
+    if (field && field->default_value)
+      field->default_value->expr->update_used_tables();
+  }
   Field *get_tmp_table_field() { return 0; }
   Item *get_tmp_table_item(THD *thd) { return this; }
   Item_field *field_for_view_update() { return 0; }
@@ -6253,21 +6186,44 @@ public:
 
 class Item_cache_real: public Item_cache
 {
+protected:
   double value;
 public:
-  Item_cache_real(THD *thd): Item_cache(thd, &type_handler_double),
-    value(0) {}
-
+  Item_cache_real(THD *thd, const Type_handler *h)
+   :Item_cache(thd, h),
+    value(0)
+  {}
   double val_real();
   longlong val_int();
-  String* val_str(String *str);
   my_decimal *val_decimal(my_decimal *);
   bool get_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
   { return get_date_from_real(ltime, fuzzydate); }
   bool cache_value();
   Item *convert_to_basic_const_item(THD *thd);
+};
+
+
+class Item_cache_double: public Item_cache_real
+{
+public:
+  Item_cache_double(THD *thd)
+   :Item_cache_real(thd, &type_handler_double)
+  { }
+  String* val_str(String *str);
   Item *get_copy(THD *thd)
-  { return get_item_copy<Item_cache_real>(thd, this); }
+  { return get_item_copy<Item_cache_double>(thd, this); }
+};
+
+
+class Item_cache_float: public Item_cache_real
+{
+public:
+  Item_cache_float(THD *thd)
+   :Item_cache_real(thd, &type_handler_float)
+  { }
+  String* val_str(String *str);
+  Item *get_copy(THD *thd)
+  { return get_item_copy<Item_cache_float>(thd, this); }
 };
 
 

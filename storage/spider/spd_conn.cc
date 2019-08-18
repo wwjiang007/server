@@ -1,4 +1,4 @@
-/* Copyright (C) 2008-2017 Kentoku Shiba
+/* Copyright (C) 2008-2018 Kentoku Shiba
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -11,7 +11,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #define MYSQL_SERVER 1
 #include <my_global.h>
@@ -1439,9 +1439,10 @@ void spider_conn_queue_time_zone(
   DBUG_VOID_RETURN;
 }
 
-void spider_conn_queue_UTC_time_zone(SPIDER_CONN *conn)
-{
-  DBUG_ENTER("spider_conn_queue_time_zone");
+void spider_conn_queue_UTC_time_zone(
+  SPIDER_CONN *conn
+) {
+  DBUG_ENTER("spider_conn_queue_UTC_time_zone");
   DBUG_PRINT("info", ("spider conn=%p", conn));
   spider_conn_queue_time_zone(conn, UTC);
   DBUG_VOID_RETURN;
@@ -2086,6 +2087,7 @@ void spider_bg_all_conn_break(
 #endif
     if (spider->quick_targets[roop_count])
     {
+      spider_db_free_one_quick_result((SPIDER_RESULT *) result_list->current);
       DBUG_ASSERT(spider->quick_targets[roop_count] == conn->quick_target);
       DBUG_PRINT("info", ("spider conn[%p]->quick_target=NULL", conn));
       conn->quick_target = NULL;

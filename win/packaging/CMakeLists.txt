@@ -11,7 +11,7 @@
 # 
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA
 
 IF(NOT WIN32)
   RETURN()
@@ -246,4 +246,21 @@ ADD_CUSTOM_TARGET(
     -P  ${CMAKE_CURRENT_SOURCE_DIR}/create_msi.cmake
 )
 ADD_DEPENDENCIES(MSI_ESSENTIALS wixca)
+
+
+IF(CMAKE_GENERATOR MATCHES "Visual Studio")
+ SET(CPACK_CONFIG_PARAM -C $(Configuration))
+ENDIF()
+
+IF(SIGNCODE)
+  SET(SIGN_COMMAND COMMAND ${CMAKE_COMMAND} -P ${PROJECT_BINARY_DIR}/sign.cmake)
+ENDIF()
+
+ADD_CUSTOM_TARGET(
+  win_package
+  ${SIGN_COMMAND}
+  COMMAND ${CMAKE_CPACK_COMMAND} ${CPACK_CONFIG_PARAM} --config ${CMAKE_CURRENT_SOURCE_DIR}/CPackZipConfig.cmake
+  COMMAND ${CMAKE_CPACK_COMMAND} ${CPACK_CONFIG_PARAM} --config ${CMAKE_CURRENT_SOURCE_DIR}/CPackZipDebugInfoConfig.cmake
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
 

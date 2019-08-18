@@ -1,7 +1,8 @@
 Code status:
 ------------
 
-* [![tests status](https://secure.travis-ci.org/MariaDB/server.png?branch=10.3)](https://travis-ci.org/MariaDB/server) travis-ci.org (10.3 branch)
+* [![Travis CI status](https://secure.travis-ci.org/MariaDB/server.png?branch=10.3)](https://travis-ci.org/MariaDB/server) travis-ci.org (10.3 branch)
+* [![Appveyor CI status](https://ci.appveyor.com/api/projects/status/4u6pexmtpuf8jq66?svg=true)](https://ci.appveyor.com/project/rasmushoj/server) ci.appveyor.com
 
 ## MariaDB: drop-in replacement for MySQL
 
@@ -44,8 +45,8 @@ https://launchpad.net/~maria-discuss
 and the #maria IRC channel on Freenode.
 
 
-License:
---------
+Licensing:
+----------
 
 ***************************************************************************
 
@@ -56,18 +57,22 @@ General Public License (GPLv2). (I.e. Without the "any later version"
 clause.) This is inherited from MySQL. Please see the README file in
 the MySQL distribution for more information.
 
-License information can be found in the COPYING, COPYING.LESSER,
-and COPYING.thirdparty files.
+License information can be found in the COPYING file. Third party
+license information can be found in the THIRDPARTY file.
 
 ***************************************************************************
 
 Bug Reports:
 ------------
 
-Bug and/or error reports regarding MariaDB should be submitted at
-https://mariadb.org/jira
+Bug and/or error reports regarding MariaDB should be submitted at:
+https://jira.mariadb.org
 
-Bugs in the MySQL code can also be submitted at https://bugs.mysql.com
+For reporting security vulnerabilities see:
+https://mariadb.org/about/security-policy/
+
+Bugs in the MySQL code can also be submitted at:
+https://bugs.mysql.com
 
 The code for MariaDB, including all revision history, can be found at:
 https://github.com/MariaDB/server

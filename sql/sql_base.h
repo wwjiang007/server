@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef SQL_BASE_INCLUDED
 #define SQL_BASE_INCLUDED
@@ -126,6 +126,7 @@ TABLE *open_ltable(THD *thd, TABLE_LIST *table_list, thr_lock_type update,
                             MYSQL_OPEN_GET_NEW_TABLE |\
                             MYSQL_OPEN_HAS_MDL_LOCK)
 
+bool is_locked_view(THD *thd, TABLE_LIST *t);
 bool open_table(THD *thd, TABLE_LIST *table_list, Open_table_context *ot_ctx);
 
 bool get_key_map_from_key_list(key_map *map, TABLE *table,
@@ -141,6 +142,8 @@ thr_lock_type read_lock_type_for_table(THD *thd,
 my_bool mysql_rm_tmp_tables(void);
 void close_tables_for_reopen(THD *thd, TABLE_LIST **tables,
                              const MDL_savepoint &start_of_statement_svp);
+bool table_already_fk_prelocked(TABLE_LIST *tl, LEX_CSTRING *db,
+                                LEX_CSTRING *table, thr_lock_type lock_type);
 TABLE_LIST *find_table_in_list(TABLE_LIST *table,
                                TABLE_LIST *TABLE_LIST::*link,
                                const LEX_CSTRING *db_name,
@@ -237,8 +240,9 @@ lock_table_names(THD *thd, TABLE_LIST *table_list,
                           table_list_end, lock_wait_timeout, flags);
 }
 bool open_tables(THD *thd, const DDL_options_st &options,
-                 TABLE_LIST **tables, uint *counter, uint flags,
-                 Prelocking_strategy *prelocking_strategy);
+                 TABLE_LIST **tables, uint *counter,
+                 uint flags, Prelocking_strategy *prelocking_strategy);
+
 static inline bool
 open_tables(THD *thd, TABLE_LIST **tables, uint *counter, uint flags,
             Prelocking_strategy *prelocking_strategy)
@@ -300,7 +304,8 @@ bool tdc_open_view(THD *thd, TABLE_LIST *table_list, uint flags);
 
 TABLE *find_table_for_mdl_upgrade(THD *thd, const char *db,
                                   const char *table_name,
-                                  bool no_error);
+                                  int *p_error);
+void mark_tmp_table_for_reuse(TABLE *table);
 
 int dynamic_column_error_message(enum_dyncol_func_result rc);
 
@@ -385,6 +390,7 @@ class Prelocking_strategy
 public:
   virtual ~Prelocking_strategy() { }
 
+  virtual void reset(THD *thd) { };
   virtual bool handle_routine(THD *thd, Query_tables_list *prelocking_ctx,
                               Sroutine_hash_entry *rt, sp_head *sp,
                               bool *need_prelocking) = 0;
@@ -392,6 +398,7 @@ public:
                             TABLE_LIST *table_list, bool *need_prelocking) = 0;
   virtual bool handle_view(THD *thd, Query_tables_list *prelocking_ctx,
                            TABLE_LIST *table_list, bool *need_prelocking)= 0;
+  virtual bool handle_end(THD *thd) { return 0; };
 };
 
 
@@ -500,6 +507,10 @@ inline bool open_and_lock_tables(THD *thd, TABLE_LIST *tables,
 
 
 bool restart_trans_for_tables(THD *thd, TABLE_LIST *table);
+
+bool extend_table_list(THD *thd, TABLE_LIST *tables,
+                       Prelocking_strategy *prelocking_strategy,
+                       bool has_prelocking_list);
 
 /**
   A context of open_tables() function, used to recover

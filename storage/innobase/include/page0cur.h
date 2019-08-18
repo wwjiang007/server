@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -27,15 +27,12 @@ Created 10/4/1994 Heikki Tuuri
 #ifndef page0cur_h
 #define page0cur_h
 
-#include "univ.i"
-
 #include "buf0types.h"
 #include "page0page.h"
 #include "rem0rec.h"
 #include "data0data.h"
 #include "mtr0mtr.h"
 #include "gis0type.h"
-
 
 #ifdef UNIV_DEBUG
 /*********************************************************//**

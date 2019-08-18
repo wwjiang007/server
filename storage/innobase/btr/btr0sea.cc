@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -20,7 +20,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -660,7 +660,7 @@ btr_search_update_hash_ref(
 		return;
 	}
 
-	ut_ad(block->page.id.space() == index->table->space->id);
+	ut_ad(block->page.id.space() == index->table->space_id);
 	ut_ad(index == cursor->index);
 	ut_ad(!dict_index_is_ibuf(index));
 
@@ -1273,7 +1273,7 @@ cleanup:
 /** Drop possible adaptive hash index entries when a page is evicted
 from the buffer pool or freed in a file, or the index is being dropped.
 @param[in]	page_id		page id */
-void btr_search_drop_page_hash_when_freed(const page_id_t& page_id)
+void btr_search_drop_page_hash_when_freed(const page_id_t page_id)
 {
 	buf_block_t*	block;
 	mtr_t		mtr;
@@ -1356,7 +1356,7 @@ btr_search_build_page_hash_index(
 	rec_offs_init(offsets_);
 	ut_ad(ahi_latch == btr_get_search_latch(index));
 	ut_ad(index);
-	ut_ad(block->page.id.space() == index->table->space->id);
+	ut_ad(block->page.id.space() == index->table->space_id);
 	ut_a(!dict_index_is_ibuf(index));
 	ut_ad(page_is_leaf(block->frame));
 
@@ -1673,7 +1673,7 @@ void btr_search_update_hash_on_delete(btr_cur_t* cursor)
 		return;
 	}
 
-	ut_ad(block->page.id.space() == index->table->space->id);
+	ut_ad(block->page.id.space() == index->table->space_id);
 	ut_a(index == cursor->index);
 	ut_a(block->curr_n_fields > 0 || block->curr_n_bytes > 0);
 	ut_a(!dict_index_is_ibuf(index));
@@ -1830,7 +1830,7 @@ btr_search_update_hash_on_insert(btr_cur_t* cursor, rw_lock_t* ahi_latch)
 		return;
 	}
 
-	ut_ad(block->page.id.space() == index->table->space->id);
+	ut_ad(block->page.id.space() == index->table->space_id);
 	btr_search_check_free_space_in_heap(index);
 
 	table = btr_get_search_table(index);

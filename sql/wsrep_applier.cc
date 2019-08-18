@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License along
    with this program; if not, write to the Free Software Foundation, Inc.,
-   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. */
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA. */
 
 #include "mariadb.h"
 #include "wsrep_priv.h"
@@ -146,6 +146,7 @@ static wsrep_cb_status_t wsrep_apply_events(THD*        thd,
     /* Use the original server id for logging. */
     thd->set_server_id(ev->server_id);
     thd->set_time();                            // time the query
+    thd->transaction.start_time.reset(thd);
     wsrep_xid_init(&thd->transaction.xid_state.xid,
                    thd->wsrep_trx_meta.gtid.uuid,
                    thd->wsrep_trx_meta.gtid.seqno);
@@ -359,7 +360,7 @@ wsrep_cb_status_t wsrep_commit_cb(void*         const     ctx,
 {
   THD* const thd((THD*)ctx);
 
-  assert(meta->gtid.seqno == wsrep_thd_trx_seqno(thd));
+  assert(meta->gtid.seqno >= wsrep_thd_trx_seqno(thd));
 
   wsrep_cb_status_t rcode;
 

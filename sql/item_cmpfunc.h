@@ -14,7 +14,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 
 /* compare and test functions */
@@ -286,6 +286,7 @@ public:
   virtual const char* func_name() const { return "isnottrue"; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_isnottrue>(thd, this); }
+  bool eval_not_null_tables(void *) { not_null_tables_cache= 0; return false; }
 };
 
 
@@ -317,6 +318,7 @@ public:
   virtual const char* func_name() const { return "isnotfalse"; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_isnotfalse>(thd, this); }
+  bool eval_not_null_tables(void *) { not_null_tables_cache= 0; return false; }
 };
 
 
@@ -652,7 +654,7 @@ public:
 class Item_func_not_all :public Item_func_not
 {
   /* allow to check presence of values in max/min optimization */
-  Item_sum_hybrid *test_sum_item;
+  Item_sum_min_max *test_sum_item;
   Item_maxmin_subselect *test_sub_item;
 
 public:
@@ -668,7 +670,7 @@ public:
   bool fix_fields(THD *thd, Item **ref)
     {return Item_func::fix_fields(thd, ref);}
   virtual void print(String *str, enum_query_type query_type);
-  void set_sum_test(Item_sum_hybrid *item) { test_sum_item= item; test_sub_item= 0; };
+  void set_sum_test(Item_sum_min_max *item) { test_sum_item= item; test_sub_item= 0; };
   void set_sub_test(Item_maxmin_subselect *item) { test_sub_item= item; test_sum_item= 0;};
   bool empty_underlying_subquery();
   Item *neg_transformer(THD *thd);
@@ -2154,6 +2156,7 @@ public:
     DBUG_ASSERT(arg_count >= 2);
     reorder_args(0);
   }
+  enum Functype functype() const   { return CASE_SEARCHED_FUNC; }
   void print(String *str, enum_query_type query_type);
   bool fix_length_and_dec();
   Item *propagate_equal_fields(THD *thd, const Context &ctx, COND_EQUAL *cond)
@@ -2206,6 +2209,7 @@ public:
     Predicant_to_list_comparator::cleanup();
     DBUG_VOID_RETURN;
   }
+  enum Functype functype() const   { return CASE_SIMPLE_FUNC; }
   void print(String *str, enum_query_type query_type);
   bool fix_length_and_dec();
   Item *propagate_equal_fields(THD *thd, const Context &ctx, COND_EQUAL *cond);
@@ -2279,7 +2283,7 @@ class Item_func_in :public Item_func_opt_neg,
   {
     for (uint i= 0; i < nitems; i++)
     {
-      if (!items[i]->const_item())
+      if (!items[i]->const_item() || items[i]->is_expensive())
         return false;
     }
     return true;
@@ -2952,6 +2956,7 @@ public:
                 Item_transformer transformer, uchar *arg_t);
   bool eval_not_null_tables(void *opt_arg);
   Item *build_clone(THD *thd);
+  bool excl_dep_on_table(table_map tab_map);
   bool excl_dep_on_grouping_fields(st_select_lex *sel);
 };
 

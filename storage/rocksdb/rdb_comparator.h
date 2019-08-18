@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
 #pragma once
 
 /* C++ system header files */
@@ -36,7 +36,7 @@ namespace myrocks {
    Rdb_key_def)
 */
 class Rdb_pk_comparator : public rocksdb::Comparator {
-public:
+ public:
   Rdb_pk_comparator(const Rdb_pk_comparator &) = delete;
   Rdb_pk_comparator &operator=(const Rdb_pk_comparator &) = delete;
   Rdb_pk_comparator() = default;
@@ -63,7 +63,7 @@ public:
 };
 
 class Rdb_rev_comparator : public rocksdb::Comparator {
-public:
+ public:
   Rdb_rev_comparator(const Rdb_rev_comparator &) = delete;
   Rdb_rev_comparator &operator=(const Rdb_rev_comparator &) = delete;
   Rdb_rev_comparator() = default;
@@ -82,4 +82,4 @@ public:
   }
 };
 
-} // namespace myrocks
+}  // namespace myrocks

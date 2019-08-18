@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
 #pragma once
 
 /* C++ standard header files */
@@ -22,8 +22,8 @@
 #include <string>
 
 /* MySQL header files */
-#include "./handler.h"
 #include <my_global.h>
+#include "./handler.h"
 
 #include "rdb_mariadb_port.h"
 
@@ -108,7 +108,7 @@ class Rdb_perf_counters {
   Rdb_perf_counters(const Rdb_perf_counters &) = delete;
   Rdb_perf_counters &operator=(const Rdb_perf_counters &) = delete;
 
-public:
+ public:
   Rdb_perf_counters() = default;
   uint64_t m_value[PC_MAX_IDX];
 
@@ -158,8 +158,11 @@ class Rdb_io_perf {
   void end_and_record(const uint32_t perf_context_level);
 
   explicit Rdb_io_perf()
-      : m_atomic_counters(nullptr), m_shared_io_perf_read(nullptr),
-        m_stats(nullptr), io_write_bytes(0), io_write_requests(0) {}
+      : m_atomic_counters(nullptr),
+        m_shared_io_perf_read(nullptr),
+        m_stats(nullptr),
+        io_write_bytes(0),
+        io_write_requests(0) {}
 };
 
-} // namespace myrocks
+}  // namespace myrocks

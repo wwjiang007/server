@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /***********************************************************************/
 /*  Author Olivier BERTRAND  bertrandop@gmail.com         2004-2017    */
@@ -255,7 +255,7 @@ bool CntOpenTable(PGLOBAL g, PTDB tdbp, MODE mode, char *c1, char *c2,
 
 	try {
 		if (!c1) {
-			if (mode == MODE_INSERT)
+//		if (mode == MODE_INSERT)	 or CHECK TABLE
 				// Allocate all column blocks for that table
 				tdbp->ColDB(g, NULL, 0);
 

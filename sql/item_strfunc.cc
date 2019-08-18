@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2018, MariaDB Corporation
+   Copyright (c) 2009, 2019, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /**
@@ -57,6 +57,27 @@ C_MODE_END
 #include "sql_statistics.h"
 
 size_t username_char_length= 80;
+
+
+class Repeat_count
+{
+  ulonglong m_count;
+public:
+  Repeat_count(Item *item)
+   :m_count(0)
+  {
+    Longlong_hybrid nr= item->to_longlong_hybrid();
+    if (!item->null_value && !nr.neg())
+    {
+      // Assume that the maximum length of a String is < INT_MAX32
+      m_count= (ulonglong) nr.value();
+      if (m_count > (ulonglong) INT_MAX32)
+        m_count= (ulonglong) INT_MAX32;
+    }
+  }
+  ulonglong count() const { return m_count; }
+};
+
 
 /*
   For the Items which have only val_str_ascii() method
@@ -603,7 +624,7 @@ String *Item_func_concat::val_str(String *str)
     goto null;
 
   if (res != str)
-    str->copy(res->ptr(), res->length(), res->charset());
+    str->copy_or_move(res->ptr(), res->length(), res->charset());
 
   for (uint i= 1 ; i < arg_count ; i++)
   {
@@ -1635,13 +1656,10 @@ String *Item_func_left::val_str(String *str)
 void Item_str_func::left_right_max_length()
 {
   uint32 char_length= args[0]->max_char_length();
-  if (args[1]->const_item())
+  if (args[1]->const_item() && !args[1]->is_expensive())
   {
-    int length= (int) args[1]->val_int();
-    if (args[1]->null_value || length <= 0)
-      char_length=0;
-    else
-      set_if_smaller(char_length, (uint) length);
+    Repeat_count tmp(args[1]);
+    set_if_smaller(char_length, (uint) tmp.count());
   }
   fix_char_length(char_length);
 }
@@ -2967,27 +2985,16 @@ bool Item_func_repeat::fix_length_and_dec()
   if (agg_arg_charsets_for_string_result(collation, args, 1))
     return TRUE;
   DBUG_ASSERT(collation.collation != NULL);
-  if (args[1]->const_item())
+  if (args[1]->const_item() && !args[1]->is_expensive())
   {
-    /* must be longlong to avoid truncation */
-    longlong count= args[1]->val_int();
-
-    /* Assumes that the maximum length of a String is < INT_MAX32. */
-    /* Set here so that rest of code sees out-of-bound value as such. */
-    if (args[1]->null_value)
-      count= 0;
-    else if (count > INT_MAX32)
-      count= INT_MAX32;
-
-    ulonglong char_length= (ulonglong) args[0]->max_char_length() * count;
+    Repeat_count tmp(args[1]);
+    ulonglong char_length= (ulonglong) args[0]->max_char_length() * tmp.count();
     fix_char_length_ulonglong(char_length);
+    return false;
   }
-  else
-  {
-    max_length= MAX_BLOB_WIDTH;
-    maybe_null= 1;
-  }
-  return FALSE;
+  max_length= MAX_BLOB_WIDTH;
+  maybe_null= true;
+  return false;
 }
 
 /**
@@ -3052,26 +3059,14 @@ err:
 bool Item_func_space::fix_length_and_dec()
 {
   collation.set(default_charset(), DERIVATION_COERCIBLE, MY_REPERTOIRE_ASCII);
-  if (args[0]->const_item())
+  if (args[0]->const_item() && !args[0]->is_expensive())
   {
-    /* must be longlong to avoid truncation */
-    longlong count= args[0]->val_int();
-    if (args[0]->null_value)
-      goto end;
-    /*
-     Assumes that the maximum length of a String is < INT_MAX32.
-     Set here so that rest of code sees out-of-bound value as such.
-    */
-    if (count > INT_MAX32)
-      count= INT_MAX32;
-    fix_char_length_ulonglong(count);
-    return FALSE;
+    fix_char_length_ulonglong(Repeat_count(args[0]).count());
+    return false;
   }
-
-end:
   max_length= MAX_BLOB_WIDTH;
-  maybe_null= 1;
-  return FALSE;
+  maybe_null= true;
+  return false;
 }
 
 
@@ -3166,6 +3161,9 @@ bool Item_func_pad::fix_length_and_dec()
 {
   if (arg_count == 3)
   {
+    String *str;
+    if (!args[2]->basic_const_item() || !(str= args[2]->val_str(&pad_str)) || !str->length())
+      maybe_null= true;
     // Handle character set for args[0] and args[2].
     if (agg_arg_charsets_for_string_result(collation, &args[0], 2, 2))
       return TRUE;
@@ -3179,24 +3177,15 @@ bool Item_func_pad::fix_length_and_dec()
     pad_str.append(" ", 1);
   }
 
-  if (args[1]->const_item())
+  DBUG_ASSERT(collation.collation->mbmaxlen > 0);
+  if (args[1]->const_item() && !args[1]->is_expensive())
   {
-    ulonglong char_length= (ulonglong) args[1]->val_int();
-    DBUG_ASSERT(collation.collation->mbmaxlen > 0);
-    /* Assumes that the maximum length of a String is < INT_MAX32. */
-    /* Set here so that rest of code sees out-of-bound value as such. */
-    if (args[1]->null_value)
-      char_length= 0;
-    else if (char_length > INT_MAX32)
-      char_length= INT_MAX32;
-    fix_char_length_ulonglong(char_length);
+    fix_char_length_ulonglong(Repeat_count(args[1]).count());
+    return false;
   }
-  else
-  {
-    max_length= MAX_BLOB_WIDTH;
-    maybe_null= 1;
-  }
-  return FALSE;
+  max_length= MAX_BLOB_WIDTH;
+  maybe_null= true;
+  return false;
 }
 
 
@@ -5141,7 +5130,7 @@ bool Item_dyncol_get::get_date(MYSQL_TIME *ltime, ulonglong fuzzy_date)
       bool neg = llval < 0;
       if (int_to_datetime_with_warn(neg, (ulonglong)(neg ? -llval :
                                                 llval),
-                                    ltime, fuzzy_date, 0 /* TODO */))
+                                    ltime, fuzzy_date, 0, 0 /* TODO */))
         goto null;
       return 0;
     }
@@ -5150,12 +5139,12 @@ bool Item_dyncol_get::get_date(MYSQL_TIME *ltime, ulonglong fuzzy_date)
     /* fall through */
   case DYN_COL_DOUBLE:
     if (double_to_datetime_with_warn(val.x.double_value, ltime, fuzzy_date,
-                                     0 /* TODO */))
+                                     0, 0 /* TODO */))
       goto null;
     return 0;
   case DYN_COL_DECIMAL:
     if (decimal_to_datetime_with_warn((my_decimal*)&val.x.decimal.value, ltime,
-                                      fuzzy_date, 0 /* TODO */))
+                                      fuzzy_date, 0, 0 /* TODO */))
       goto null;
     return 0;
   case DYN_COL_STRING:

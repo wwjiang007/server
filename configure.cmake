@@ -11,7 +11,7 @@
 # 
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA
 #
 
 INCLUDE (CheckCSourceCompiles)
@@ -260,7 +260,7 @@ SET(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS} -DPACKAGE=test) # b
 CHECK_INCLUDE_FILES (bfd.h BFD_H_EXISTS)
 IF(BFD_H_EXISTS)
   IF(NOT_FOR_DISTRIBUTION)
-    SET(NON_DISTRIBUTABLE_WARNING 1)
+    SET(NON_DISTRIBUTABLE_WARNING "GPLv3")
     SET(HAVE_BFD_H 1)
   ENDIF()
 ENDIF()
@@ -758,32 +758,6 @@ IF(NOT C_HAS_inline)
   ENDIF()
 ENDIF()
 
-IF(NOT CMAKE_CROSSCOMPILING AND NOT MSVC)
-  STRING(TOLOWER ${CMAKE_SYSTEM_PROCESSOR}  processor)
-  IF(processor MATCHES "86" OR processor MATCHES "amd64" OR processor MATCHES "x64")
-  #Check for x86 PAUSE instruction
-  # We have to actually try running the test program, because of a bug
-  # in Solaris on x86_64, where it wrongly reports that PAUSE is not
-  # supported when trying to run an application.  See
-  # http://bugs.opensolaris.org/bugdatabase/printableBug.do?bug_id=6478684
-  CHECK_C_SOURCE_RUNS("
-  int main()
-  { 
-    __asm__ __volatile__ (\"pause\"); 
-    return 0;
-  }"  HAVE_PAUSE_INSTRUCTION)
-  ENDIF()
-  IF (NOT HAVE_PAUSE_INSTRUCTION)
-    CHECK_C_SOURCE_COMPILES("
-    int main()
-    {
-     __asm__ __volatile__ (\"rep; nop\");
-     return 0;
-    }
-   " HAVE_FAKE_PAUSE_INSTRUCTION)
-  ENDIF()
-ENDIF()
-  
 CHECK_SYMBOL_EXISTS(tcgetattr "termios.h" HAVE_TCGETATTR 1)
 
 #
@@ -986,11 +960,14 @@ CHECK_STRUCT_HAS_MEMBER("struct sockaddr_in6" sin6_len
 
 SET(CMAKE_EXTRA_INCLUDE_FILES) 
 
-CHECK_INCLUDE_FILE(ucontext.h HAVE_UCONTEXT_H)
-IF(NOT HAVE_UCONTEXT_H)
-  CHECK_INCLUDE_FILE(sys/ucontext.h HAVE_UCONTEXT_H)
+CHECK_STRUCT_HAS_MEMBER("struct dirent" d_ino "dirent.h"  STRUCT_DIRENT_HAS_D_INO)
+CHECK_STRUCT_HAS_MEMBER("struct dirent" d_namlen "dirent.h"  STRUCT_DIRENT_HAS_D_NAMLEN)
+SET(SPRINTF_RETURNS_INT 1)
+CHECK_INCLUDE_FILE(ucontext.h HAVE_FILE_UCONTEXT_H)
+IF(NOT HAVE_FILE_UCONTEXT_H)
+  CHECK_INCLUDE_FILE(sys/ucontext.h HAVE_FILE_UCONTEXT_H)
 ENDIF()
-IF(HAVE_UCONTEXT_H)
+IF(HAVE_FILE_UCONTEXT_H)
   CHECK_FUNCTION_EXISTS(makecontext HAVE_UCONTEXT_H)
 ENDIF()
 

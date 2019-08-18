@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -44,7 +44,6 @@ Created 11/5/1995 Heikki Tuuri
 #include "log0recv.h"
 #include "srv0srv.h"
 #include "srv0mon.h"
-#include "lock0lock.h"
 
 /** The number of blocks from the LRU_old pointer onward, including
 the block pointed to, must be buf_pool->LRU_old_ratio/BUF_LRU_OLD_RATIO_DIV
@@ -1596,10 +1595,6 @@ buf_LRU_free_page(
 		goto func_exit;
 	}
 
-#ifdef UNIV_IBUF_COUNT_DEBUG
-	ut_a(ibuf_count_get(bpage->id) == 0);
-#endif /* UNIV_IBUF_COUNT_DEBUG */
-
 	if (zip || !bpage->zip.data) {
 		/* This would completely free the block. */
 		/* Do not completely free dirty blocks. */
@@ -2160,7 +2155,8 @@ buf_LRU_block_free_hashed_page(
 	buf_page_mutex_enter(block);
 
 	if (buf_pool->flush_rbt == NULL) {
-		block->page.id.reset();
+		block->page.id
+		    = page_id_t(ULINT32_UNDEFINED, ULINT32_UNDEFINED);
 	}
 
 	buf_block_set_state(block, BUF_BLOCK_MEMORY);
@@ -2169,24 +2165,30 @@ buf_LRU_block_free_hashed_page(
 	buf_page_mutex_exit(block);
 }
 
-/******************************************************************//**
-Remove one page from LRU list and put it to free list */
-void
-buf_LRU_free_one_page(
-/*==================*/
-	buf_page_t*	bpage)	/*!< in/out: block, must contain a file page and
-				be in a state where it can be freed; there
-				may or may not be a hash index to the page */
+/** Remove one page from LRU list and put it to free list.
+@param[in,out]	bpage		block, must contain a file page and be in
+				a freeable state; there may or may not be a
+				hash index to the page
+@param[in]	old_page_id	page number before bpage->id was invalidated */
+void buf_LRU_free_one_page(buf_page_t* bpage, page_id_t old_page_id)
 {
 	buf_pool_t*	buf_pool = buf_pool_from_bpage(bpage);
-
-	rw_lock_t*	hash_lock = buf_page_hash_lock_get(buf_pool, bpage->id);
+	rw_lock_t*	hash_lock = buf_page_hash_lock_get(buf_pool,
+							   old_page_id);
 	BPageMutex*	block_mutex = buf_page_get_mutex(bpage);
 
 	ut_ad(buf_pool_mutex_own(buf_pool));
 
 	rw_lock_x_lock(hash_lock);
+
+	while (buf_block_get_fix(bpage) > 0) {
+		/* Wait for other threads to release the fix count
+		before releasing the bpage from LRU list. */
+	}
+
 	mutex_enter(block_mutex);
+
+	bpage->id = old_page_id;
 
 	if (buf_LRU_block_remove_hashed(bpage, true)) {
 		buf_LRU_block_free_hashed_page((buf_block_t*) bpage);
@@ -2208,8 +2210,8 @@ buf_LRU_old_ratio_update_instance(
 	buf_pool_t*	buf_pool,/*!< in: buffer pool instance */
 	uint		old_pct,/*!< in: Reserve this percentage of
 				the buffer pool for "old" blocks. */
-	ibool		adjust)	/*!< in: TRUE=adjust the LRU list;
-				FALSE=just assign buf_pool->LRU_old_ratio
+	bool		adjust)	/*!< in: true=adjust the LRU list;
+				false=just assign buf_pool->LRU_old_ratio
 				during the initialization of InnoDB */
 {
 	uint	ratio;
@@ -2251,8 +2253,8 @@ buf_LRU_old_ratio_update(
 /*=====================*/
 	uint	old_pct,/*!< in: Reserve this percentage of
 			the buffer pool for "old" blocks. */
-	ibool	adjust)	/*!< in: TRUE=adjust the LRU list;
-			FALSE=just assign buf_pool->LRU_old_ratio
+	bool	adjust)	/*!< in: true=adjust the LRU list;
+			false=just assign buf_pool->LRU_old_ratio
 			during the initialization of InnoDB */
 {
 	uint	new_ratio = 0;

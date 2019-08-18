@@ -1,6 +1,6 @@
 /*
-  Copyright (c) 2005, 2017, Oracle and/or its affiliates.
-  Copyright (c) 2009, 2018, MariaDB
+  Copyright (c) 2005, 2019, Oracle and/or its affiliates.
+  Copyright (c) 2009, 2019, MariaDB
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -13,7 +13,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /*
@@ -2194,7 +2194,7 @@ void ha_partition::update_create_info(HA_CREATE_INFO *create_info)
   uint num_parts= (num_subparts ? m_file_tot_parts / num_subparts :
                    m_file_tot_parts);
   HA_CREATE_INFO dummy_info;
-  memset(&dummy_info, 0, sizeof(dummy_info));
+  dummy_info.init();
 
   /*
     Since update_create_info() can be called from mysql_prepare_alter_table()
@@ -3516,7 +3516,8 @@ int ha_partition::open(const char *name, int mode, uint test_if_locked)
   if (init_partition_bitmaps())
     goto err_alloc;
 
-  if (unlikely((error=
+  if (!MY_TEST(m_is_clone_of) &&
+      unlikely((error=
                 m_part_info->set_partition_bitmaps(m_partitions_to_open))))
     goto err_alloc;
 
@@ -3950,7 +3951,12 @@ int ha_partition::external_lock(THD *thd, int lock_type)
   {
     if (m_part_info->part_expr)
       m_part_info->part_expr->walk(&Item::register_field_in_read_map, 1, 0);
-    if (m_part_info->part_type == VERSIONING_PARTITION)
+    if (m_part_info->part_type == VERSIONING_PARTITION &&
+      /* TODO: MDEV-20345 exclude more inapproriate commands like INSERT
+         These commands may be excluded because working history partition is needed
+         only for versioned DML. */
+      thd->lex->sql_command != SQLCOM_SELECT &&
+      thd->lex->sql_command != SQLCOM_INSERT_SELECT)
       m_part_info->vers_set_hist_part(thd);
   }
   DBUG_RETURN(0);
@@ -4034,9 +4040,14 @@ THR_LOCK_DATA **ha_partition::store_lock(THD *thd,
   }
   else
   {
-    for (i= bitmap_get_first_set(&(m_part_info->lock_partitions));
+    MY_BITMAP *used_partitions= lock_type == TL_UNLOCK ||
+                                lock_type == TL_IGNORE ?
+                                &m_locked_partitions :
+                                &m_part_info->lock_partitions;
+
+    for (i= bitmap_get_first_set(used_partitions);
          i < m_tot_parts;
-         i= bitmap_get_next_set(&m_part_info->lock_partitions, i))
+         i= bitmap_get_next_set(used_partitions, i))
     {
       DBUG_PRINT("info", ("store lock %u iteration", i));
       to= m_file[i]->store_lock(thd, to, lock_type);
@@ -4087,8 +4098,24 @@ int ha_partition::start_stmt(THD *thd, thr_lock_type lock_type)
     /* Add partition to be called in reset(). */
     bitmap_set_bit(&m_partitions_to_reset, i);
   }
-  if (lock_type == F_WRLCK && m_part_info->part_expr)
-    m_part_info->part_expr->walk(&Item::register_field_in_read_map, 1, 0);
+  switch (lock_type)
+  {
+  case TL_WRITE_ALLOW_WRITE:
+  case TL_WRITE_CONCURRENT_INSERT:
+  case TL_WRITE_DELAYED:
+  case TL_WRITE_DEFAULT:
+  case TL_WRITE_LOW_PRIORITY:
+  case TL_WRITE:
+  case TL_WRITE_ONLY:
+    if (m_part_info->part_expr)
+      m_part_info->part_expr->walk(&Item::register_field_in_read_map, 1, 0);
+    if (m_part_info->part_type == VERSIONING_PARTITION &&
+      // TODO: MDEV-20345 (see above)
+      thd->lex->sql_command != SQLCOM_SELECT &&
+      thd->lex->sql_command != SQLCOM_INSERT_SELECT)
+      m_part_info->vers_set_hist_part(thd);
+  default:;
+  }
   DBUG_RETURN(error);
 }
 
@@ -8196,8 +8223,9 @@ int ha_partition::info(uint flag)
     stats.deleted= 0;
     stats.data_file_length= 0;
     stats.index_file_length= 0;
-    stats.check_time= 0;
     stats.delete_length= 0;
+    stats.check_time= 0;
+    stats.checksum= 0;
     for (i= bitmap_get_first_set(&m_part_info->read_partitions);
          i < m_tot_parts;
          i= bitmap_get_next_set(&m_part_info->read_partitions, i))
@@ -8211,6 +8239,7 @@ int ha_partition::info(uint flag)
       stats.delete_length+= file->stats.delete_length;
       if (file->stats.check_time > stats.check_time)
         stats.check_time= file->stats.check_time;
+      stats.checksum+= file->stats.checksum;
     }
     if (stats.records && stats.records < 2 &&
         !(m_file[0]->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT))
@@ -8366,10 +8395,7 @@ void ha_partition::get_dynamic_partition_info(PARTITION_STATS *stat_info,
   stat_info->create_time=          file->stats.create_time;
   stat_info->update_time=          file->stats.update_time;
   stat_info->check_time=           file->stats.check_time;
-  stat_info->check_sum= 0;
-  if (file->ha_table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_NEW_CHECKSUM))
-    stat_info->check_sum= file->checksum();
-  return;
+  stat_info->check_sum=            file->stats.checksum;
 }
 
 
@@ -10074,7 +10100,12 @@ bool ha_partition::inplace_alter_table(TABLE *altered_table,
 
   for (index= 0; index < m_tot_parts && !error; index++)
   {
-    ha_alter_info->handler_ctx= part_inplace_ctx->handler_ctx_array[index];
+    if ((ha_alter_info->handler_ctx=
+	 part_inplace_ctx->handler_ctx_array[index]) != NULL
+	&& index != 0)
+      ha_alter_info->handler_ctx->set_shared_data
+	(*part_inplace_ctx->handler_ctx_array[index - 1]);
+
     if (m_file[index]->ha_inplace_alter_table(altered_table,
                                               ha_alter_info))
       error= true;
@@ -10505,31 +10536,37 @@ void ha_partition::release_auto_increment()
       m_file[i]->ha_release_auto_increment();
     }
   }
-  else if (next_insert_id)
+  else
   {
-    ulonglong next_auto_inc_val;
     lock_auto_increment();
-    next_auto_inc_val= part_share->next_auto_inc_val;
-    /*
-      If the current auto_increment values is lower than the reserved
-      value, and the reserved value was reserved by this thread,
-      we can lower the reserved value.
-    */
-    if (next_insert_id < next_auto_inc_val &&
-        auto_inc_interval_for_cur_row.maximum() >= next_auto_inc_val)
+    if (next_insert_id)
     {
-      THD *thd= ha_thd();
+      ulonglong next_auto_inc_val= part_share->next_auto_inc_val;
       /*
-        Check that we do not lower the value because of a failed insert
-        with SET INSERT_ID, i.e. forced/non generated values.
+        If the current auto_increment values is lower than the reserved
+        value, and the reserved value was reserved by this thread,
+        we can lower the reserved value.
       */
-      if (thd->auto_inc_intervals_forced.maximum() < next_insert_id)
-        part_share->next_auto_inc_val= next_insert_id;
+      if (next_insert_id < next_auto_inc_val &&
+          auto_inc_interval_for_cur_row.maximum() >= next_auto_inc_val)
+      {
+        THD *thd= ha_thd();
+        /*
+          Check that we do not lower the value because of a failed insert
+          with SET INSERT_ID, i.e. forced/non generated values.
+        */
+        if (thd->auto_inc_intervals_forced.maximum() < next_insert_id)
+          part_share->next_auto_inc_val= next_insert_id;
+      }
+      DBUG_PRINT("info", ("part_share->next_auto_inc_val: %lu",
+                          (ulong) part_share->next_auto_inc_val));
     }
-    DBUG_PRINT("info", ("part_share->next_auto_inc_val: %lu",
-                        (ulong) part_share->next_auto_inc_val));
-
-    /* Unlock the multi row statement lock taken in get_auto_increment */
+    /*
+      Unlock the multi-row statement lock taken in get_auto_increment.
+      These actions must be performed even if the next_insert_id field
+      contains zero, otherwise if the update_auto_increment fails then
+      an unnecessary lock will remain:
+    */
     if (auto_increment_safe_stmt_log_lock)
     {
       auto_increment_safe_stmt_log_lock= FALSE;
@@ -10548,27 +10585,6 @@ void ha_partition::release_auto_increment()
 void ha_partition::init_table_handle_for_HANDLER()
 {
   return;
-}
-
-
-/**
-  Return the checksum of the table (all partitions)
-*/
-
-uint ha_partition::checksum() const
-{
-  ha_checksum sum= 0;
-
-  DBUG_ENTER("ha_partition::checksum");
-  if ((table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_NEW_CHECKSUM)))
-  {
-    handler **file= m_file;
-    do
-    {
-      sum+= (*file)->checksum();
-    } while (*(++file));
-  }
-  DBUG_RETURN(sum);
 }
 
 
@@ -10893,11 +10909,9 @@ int ha_partition::check_for_upgrade(HA_CHECK_OPT *check_opt)
           }
           m_part_info->key_algorithm= partition_info::KEY_ALGORITHM_51;
           if (skip_generation ||
-              !(part_buf= generate_partition_syntax(thd, m_part_info,
-                                                    &part_buf_len,
-                                                    true,
-                                                    NULL,
-                                                    NULL)) ||
+              !(part_buf= generate_partition_syntax_for_frm(thd, m_part_info,
+                                                            &part_buf_len,
+                                                            NULL, NULL)) ||
 	      print_admin_msg(thd, SQL_ADMIN_MSG_TEXT_SIZE + 1, "error",
 	                      table_share->db.str,
 	                      table->alias,

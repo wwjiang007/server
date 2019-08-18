@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /*
@@ -611,8 +611,9 @@ st_select_lex_unit::init_prepare_fake_select_lex(THD *thd_arg,
     called at the first execution of the statement, while first_execution
     shows whether this is called at the first execution of the union that
     may form just a subselect.
-  */    
-  if (!fake_select_lex->first_execution && first_execution)
+  */
+  if ((fake_select_lex->changed_elements & TOUCHED_SEL_COND) &&
+      first_execution)
   {
     for (ORDER *order= global_parameters()->order_list.first;
          order;
@@ -830,7 +831,8 @@ bool st_select_lex_unit::prepare(TABLE_LIST *derived_arg,
   bool is_union_select;
   bool have_except= FALSE, have_intersect= FALSE;
   bool instantiate_tmp_table= false;
-  bool single_tvc= !first_sl->next_select() && first_sl->tvc;
+  bool single_tvc= !first_sl->next_select() && first_sl->tvc &&
+                   !fake_select_lex;
   DBUG_ENTER("st_select_lex_unit::prepare");
   DBUG_ASSERT(thd == current_thd);
 
@@ -985,7 +987,23 @@ bool st_select_lex_unit::prepare(TABLE_LIST *derived_arg,
   {
     if (sl->tvc)
     {
-      if (sl->tvc->prepare(thd, sl, tmp_result, this))
+      if (sl->tvc->to_be_wrapped_as_with_tail() &&
+          !(thd->lex->context_analysis_only & CONTEXT_ANALYSIS_ONLY_VIEW))
+
+      {
+        st_select_lex *wrapper_sl= wrap_tvc_with_tail(thd, sl);
+        if (!wrapper_sl)
+          goto err;
+
+        if (sl == first_sl)
+          first_sl= wrapper_sl;
+        sl= wrapper_sl;
+
+        if (prepare_join(thd, sl, tmp_result, additional_options,
+                         is_union_select))
+	  goto err;
+      }
+      else if (sl->tvc->prepare(thd, sl, tmp_result, this))
 	goto err;
     }
     else if (prepare_join(thd, sl, tmp_result, additional_options,
@@ -1046,8 +1064,11 @@ bool st_select_lex_unit::prepare(TABLE_LIST *derived_arg,
                                               0))
           goto err;
         if (!derived_arg->table)
-          derived_arg->table= derived_arg->derived_result->table=
-            with_element->rec_result->rec_tables.head();
+        {
+          derived_arg->table= with_element->rec_result->rec_tables.head();
+          if (derived_arg->derived_result)
+            derived_arg->derived_result->table= derived_arg->table;
+        }
         with_element->mark_as_with_prepared_anchor();
         is_rec_result_table_created= true;
       }
@@ -1236,15 +1257,6 @@ cont:
           allocation in setup_ref_array().
         */
         fake_select_lex->n_child_sum_items+= global_parameters()->n_sum_items;
-
-	saved_error= fake_select_lex->join->
-	  prepare(fake_select_lex->table_list.first,
-		  0, 0,
-                  global_parameters()->order_list.elements, // og_num
-                  global_parameters()->order_list.first,    // order
-                  false, NULL, NULL, NULL,
-		  fake_select_lex, this);
-	fake_select_lex->table_list.empty();
       }
     }
     else
@@ -1254,6 +1266,24 @@ cont:
         reset field items to point at fields from the created temporary table.
       */
       table->reset_item_list(&item_list, intersect_mark ? 1 : 0);
+    }
+    if (fake_select_lex != NULL &&
+        (thd->stmt_arena->is_stmt_prepare() ||
+         (thd->lex->context_analysis_only & CONTEXT_ANALYSIS_ONLY_VIEW)))
+    {
+      if (!fake_select_lex->join &&
+          !(fake_select_lex->join=
+            new JOIN(thd, item_list, thd->variables.option_bits, result)))
+      {
+         fake_select_lex->table_list.empty();
+         DBUG_RETURN(TRUE);
+      }
+      saved_error= fake_select_lex->join->
+        prepare(fake_select_lex->table_list.first, 0, 0,
+                global_parameters()->order_list.elements, // og_num
+                global_parameters()->order_list.first,    // order
+                false, NULL, NULL, NULL, fake_select_lex, this);
+      fake_select_lex->table_list.empty();
     }
   }
 
@@ -1728,6 +1758,7 @@ bool st_select_lex_unit::exec_recursive()
       }
     }
     thd->lex->current_select= sl;
+    set_limit(sl);
     if (sl->tvc)
       sl->tvc->exec(sl);
     else
@@ -1796,6 +1827,37 @@ bool st_select_lex_unit::cleanup()
   {
     DBUG_RETURN(FALSE);
   }
+  /*
+    When processing a PS/SP or an EXPLAIN command cleanup of a unit can
+    be performed immediately when the unit is reached in the cleanup
+    traversal initiated by the cleanup of the main unit.
+  */
+  if (!thd->stmt_arena->is_stmt_prepare() && !thd->lex->describe &&
+      with_element && with_element->is_recursive && union_result)
+  {
+    select_union_recursive *result= with_element->rec_result;
+    if (++result->cleanup_count == with_element->rec_outer_references)
+    {
+      /*
+        Perform cleanup for with_element and for all with elements
+        mutually recursive with it.
+      */
+      cleaned= 1;
+      with_element->get_next_mutually_recursive()->spec->cleanup();
+    }
+    else
+    {
+      /*
+        Just increment by 1 cleanup_count for with_element and
+        for all with elements mutually recursive with it.
+      */
+      With_element *with_elem= with_element;
+      while ((with_elem= with_elem->get_next_mutually_recursive()) !=
+             with_element)
+        with_elem->rec_result->cleanup_count++;
+      DBUG_RETURN(FALSE);
+    }
+  }
   cleaned= 1;
 
   for (SELECT_LEX *sl= first_select(); sl; sl= sl->next_select())
@@ -1826,7 +1888,7 @@ bool st_select_lex_unit::cleanup()
 
   if (with_element && with_element->is_recursive)
   {
-    if (union_result )
+    if (union_result)
     {
       ((select_union_recursive *) union_result)->cleanup();
       delete union_result;
@@ -2003,4 +2065,44 @@ void st_select_lex_unit::set_unique_exclude()
       unit->set_unique_exclude();
     }
   }
+}
+
+/**
+  @brief
+  Check if the derived table is guaranteed to have distinct rows because of
+  UNION operations used to populate it.
+
+  @detail
+    UNION operation removes duplicate rows from its output. That is, a query like
+
+      select * from t1 UNION select * from t2
+
+    will not produce duplicate rows in its output, even if table t1 (and/or t2)
+    contain duplicate rows. EXCEPT and INTERSECT operations also have this
+    property.
+
+    On the other hand, UNION ALL operation doesn't remove duplicates. (The SQL
+    standard also defines EXCEPT ALL and INTERSECT ALL, but we don't support
+    them).
+
+    st_select_lex_unit computes its value left to right. That is, if there is
+     a st_select_lex_unit object describing
+
+      (select #1) OP1 (select #2) OP2 (select #3)
+
+    then ((select #1) OP1 (select #2)) is computed first, and OP2 is computed
+    second.
+
+    How can one tell if st_select_lex_unit is guaranteed to have distinct
+    output rows? This depends on whether the last operation was duplicate-
+    removing or not:
+    - UNION ALL is not duplicate-removing
+    - all other operations are duplicate-removing
+*/
+
+bool st_select_lex_unit::check_distinct_in_union()
+{
+  if (union_distinct && !union_distinct->next_select())
+    return true;
+  return false;
 }

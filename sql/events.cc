@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -418,11 +418,17 @@ Events::create_event(THD *thd, Event_parse_data *parse_data)
 
   thd->restore_stmt_binlog_format(save_binlog_format);
 
+  if (!ret && Events::opt_event_scheduler == Events::EVENTS_OFF)
+  {
+    push_warning(thd, Sql_condition::WARN_LEVEL_WARN, ER_UNKNOWN_ERROR, 
+      "Event scheduler is switched off, use SET GLOBAL event_scheduler=ON to enable it.");
+  }
+
   DBUG_RETURN(ret);
-#ifdef WITH_WSREP
- error:
+
+WSREP_ERROR_LABEL:
   DBUG_RETURN(TRUE);
-#endif /* WITH_WSREP */
+
 }
 
 
@@ -463,6 +469,7 @@ Events::update_event(THD *thd, Event_parse_data *parse_data,
 
   if (check_access(thd, EVENT_ACL, parse_data->dbname.str, NULL, NULL, 0, 0))
     DBUG_RETURN(TRUE);
+
   WSREP_TO_ISOLATION_BEGIN(WSREP_MYSQL_DB, NULL, NULL);
 
   if (lock_object_name(thd, MDL_key::EVENT,
@@ -549,10 +556,9 @@ Events::update_event(THD *thd, Event_parse_data *parse_data,
 
   thd->restore_stmt_binlog_format(save_binlog_format);
   DBUG_RETURN(ret);
-#ifdef WITH_WSREP
-error:
+
+WSREP_ERROR_LABEL:
   DBUG_RETURN(TRUE);
-#endif /* WITH_WSREP */
 }
 
 
@@ -593,6 +599,7 @@ Events::drop_event(THD *thd, const LEX_CSTRING *dbname,
 
   if (check_access(thd, EVENT_ACL, dbname->str, NULL, NULL, 0, 0))
     DBUG_RETURN(TRUE);
+
   WSREP_TO_ISOLATION_BEGIN(WSREP_MYSQL_DB, NULL, NULL);
 
   /*
@@ -616,10 +623,9 @@ Events::drop_event(THD *thd, const LEX_CSTRING *dbname,
 
   thd->restore_stmt_binlog_format(save_binlog_format);
   DBUG_RETURN(ret);
-#ifdef WITH_WSREP
-error:
+
+WSREP_ERROR_LABEL:
   DBUG_RETURN(TRUE);
-#endif /* WITH_WSREP */
 }
 
 

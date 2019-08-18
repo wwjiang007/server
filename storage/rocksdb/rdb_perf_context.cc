@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
 
 #include <my_global.h>
 
@@ -98,17 +98,19 @@ std::string rdb_pc_stat_types[] = {
     "IO_RANGE_SYNC_NANOS",
     "IO_LOGGER_NANOS"};
 
-#define IO_PERF_RECORD(_field_)                                                \
-  do {                                                                         \
-    if (rocksdb::get_perf_context()->_field_ > 0)                              \
-      counters->m_value[idx] += rocksdb::get_perf_context()->_field_;          \
-    idx++;                                                                     \
+#define IO_PERF_RECORD(_field_)                                       \
+  do {                                                                \
+    if (rocksdb::get_perf_context()->_field_ > 0) {                   \
+      counters->m_value[idx] += rocksdb::get_perf_context()->_field_; \
+    }                                                                 \
+    idx++;                                                            \
   } while (0)
-#define IO_STAT_RECORD(_field_)                                                \
-  do {                                                                         \
-    if (rocksdb::get_iostats_context()->_field_ > 0)                           \
-      counters->m_value[idx] += rocksdb::get_iostats_context()->_field_;       \
-    idx++;                                                                     \
+#define IO_STAT_RECORD(_field_)                                          \
+  do {                                                                   \
+    if (rocksdb::get_iostats_context()->_field_ > 0) {                   \
+      counters->m_value[idx] += rocksdb::get_iostats_context()->_field_; \
+    }                                                                    \
+    idx++;                                                               \
   } while (0)
 
 static void harvest_diffs(Rdb_atomic_perf_counters *const counters) {
@@ -280,4 +282,4 @@ void Rdb_io_perf::end_and_record(const uint32_t perf_context_level) {
 #endif
 }
 
-} // namespace myrocks
+}  // namespace myrocks

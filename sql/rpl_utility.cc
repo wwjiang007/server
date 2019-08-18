@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include "mariadb.h"
 #include <my_bit.h>
@@ -817,14 +817,44 @@ can_convert_field_to(Field *field,
   case MYSQL_TYPE_TIME:
   case MYSQL_TYPE_DATETIME:
   case MYSQL_TYPE_YEAR:
-  case MYSQL_TYPE_NEWDATE:
   case MYSQL_TYPE_NULL:
   case MYSQL_TYPE_ENUM:
   case MYSQL_TYPE_SET:
   case MYSQL_TYPE_TIMESTAMP2:
-  case MYSQL_TYPE_DATETIME2:
   case MYSQL_TYPE_TIME2:
     DBUG_RETURN(false);
+  case MYSQL_TYPE_NEWDATE:
+    {
+      if (field->real_type() == MYSQL_TYPE_DATETIME2 ||
+          field->real_type() == MYSQL_TYPE_DATETIME)
+      {
+        *order_var= -1;
+        DBUG_RETURN(is_conversion_ok(*order_var, rli));
+      }
+      else
+      {
+        DBUG_RETURN(false);
+      }
+    }
+    break;
+
+  //case MYSQL_TYPE_DATETIME: TODO: fix MDEV-17394 and uncomment.
+  //
+  //The "old" type does not specify the fraction part size which is required
+  //for correct conversion.
+  case MYSQL_TYPE_DATETIME2:
+    {
+      if (field->real_type() == MYSQL_TYPE_NEWDATE)
+      {
+        *order_var= 1;
+        DBUG_RETURN(is_conversion_ok(*order_var, rli));
+      }
+      else
+      {
+        DBUG_RETURN(false);
+      }
+    }
+    break;
   }
   DBUG_RETURN(false);                                 // To keep GCC happy
 }

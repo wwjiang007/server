@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted
 by Percona Inc.. Those modifications are
@@ -22,7 +22,7 @@ Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 ***********************************************************************/
 
@@ -34,11 +34,8 @@ Created 10/21/1995 Heikki Tuuri
 *******************************************************/
 
 #ifndef UNIV_INNOCHECKSUM
-
-#include "ha_prototypes.h"
-#include "sql_const.h"
-
 #include "os0file.h"
+#include "sql_const.h"
 
 #ifdef UNIV_LINUX
 #include <sys/types.h>
@@ -48,9 +45,6 @@ Created 10/21/1995 Heikki Tuuri
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "fil0fil.h"
-#include "fil0crypt.h"
-#include "fsp0fsp.h"
-#include "fil0pagecompress.h"
 #include "srv0srv.h"
 #ifdef HAVE_LINUX_UNISTD_H
 #include "unistd.h"
@@ -1090,21 +1084,14 @@ os_aio_validate_skip()
 /** Try os_aio_validate() every this many times */
 # define OS_AIO_VALIDATE_SKIP	13
 
-	/** The os_aio_validate() call skip counter.
-	Use a signed type because of the race condition below. */
-	static int os_aio_validate_count = OS_AIO_VALIDATE_SKIP;
+	static int os_aio_validate_count;
 
-	/* There is a race condition below, but it does not matter,
-	because this call is only for heuristic purposes. We want to
-	reduce the call frequency of the costly os_aio_validate()
-	check in debug builds. */
-	--os_aio_validate_count;
-
-	if (os_aio_validate_count > 0) {
-		return(true);
+	if (my_atomic_add32_explicit(&os_aio_validate_count, -1,
+				     MY_MEMORY_ORDER_RELAXED)
+	    % OS_AIO_VALIDATE_SKIP) {
+		return true;
 	}
 
-	os_aio_validate_count = OS_AIO_VALIDATE_SKIP;
 	return(os_aio_validate());
 }
 #endif /* UNIV_DEBUG */
@@ -1775,6 +1762,8 @@ LinuxAIOHandler::resubmit(Slot* slot)
 	slot->n_bytes = 0;
 	slot->io_already_done = false;
 
+	compile_time_assert(sizeof(off_t) >= sizeof(os_offset_t));
+
 	struct iocb*	iocb = &slot->control;
 
 	if (slot->type.is_read()) {
@@ -1784,7 +1773,7 @@ LinuxAIOHandler::resubmit(Slot* slot)
 			slot->file,
 			slot->ptr,
 			slot->len,
-			static_cast<off_t>(slot->offset));
+			slot->offset);
 	} else {
 
 		ut_a(slot->type.is_write());
@@ -1794,7 +1783,7 @@ LinuxAIOHandler::resubmit(Slot* slot)
 			slot->file,
 			slot->ptr,
 			slot->len,
-			static_cast<off_t>(slot->offset));
+			slot->offset);
 	}
 
 	iocb->data = slot;
@@ -1969,10 +1958,24 @@ LinuxAIOHandler::collect()
 			will be done in the calling function. */
 			m_array->acquire();
 
-			slot->ret = events[i].res2;
+			/* events[i].res2 should always be ZERO */
+			ut_ad(events[i].res2 == 0);
 			slot->io_already_done = true;
-			slot->n_bytes = events[i].res;
 
+			/*Even though events[i].res is an unsigned number
+			in libaio, it is used to return a negative value
+			(negated errno value) to indicate error and a positive
+			value to indicate number of bytes read or written. */
+
+			if (events[i].res > slot->len) {
+				/* failure */
+				slot->n_bytes = 0;
+				slot->ret = events[i].res;
+			} else {
+				/* success */
+				slot->n_bytes = events[i].res;
+				slot->ret = 0;
+			}
 			m_array->release();
 		}
 
@@ -2502,18 +2505,10 @@ os_file_fsync_posix(
 			ut_a(failures < 2000);
 			break;
 
-		case EIO:
-			ib::error() << "fsync() returned EIO, aborting";
-			/* fall through */
 		default:
-			ut_error;
-			break;
+			ib::fatal() << "fsync() returned " << errno;
 		}
 	}
-
-	ut_error;
-
-	return(-1);
 }
 
 /** Check the existence and type of the given file.
@@ -4989,7 +4984,8 @@ Requests a synchronous write operation.
 @param[out]	buf		buffer from which to write
 @param[in]	offset		file offset from the start where to read
 @param[in]	n		number of bytes to read, starting from offset
-@return DB_SUCCESS if request was successful, false if fail */
+@return error code
+@retval	DB_SUCCESS	if the operation succeeded */
 dberr_t
 os_file_write_func(
 	const IORequest&	type,
@@ -5446,7 +5442,8 @@ Requests a synchronous positioned read operation.
 @param[out]	buf		buffer where to read
 @param[in]	offset		file offset from the start where to read
 @param[in]	n		number of bytes to read, starting from offset
-@return DB_SUCCESS or error code */
+@return error code
+@retval	DB_SUCCESS	if the operation succeeded */
 dberr_t
 os_file_read_func(
 	const IORequest&	type,
@@ -5737,7 +5734,7 @@ AIO::AIO(
 	m_not_full = os_event_create("aio_not_full");
 	m_is_empty = os_event_create("aio_is_empty");
 
-	memset(&m_slots[0], 0x0, sizeof(m_slots[0]) * m_slots.size());
+	memset((void*)&m_slots[0], 0x0, sizeof(m_slots[0]) * m_slots.size());
 #ifdef LINUX_NATIVE_AIO
 	memset(&m_events[0], 0x0, sizeof(m_events[0]) * m_events.size());
 #endif /* LINUX_NATIVE_AIO */
@@ -6009,7 +6006,7 @@ AIO::start(
 
 	os_aio_validate();
 
-	os_last_printout = ut_time();
+	os_last_printout = time(NULL);
 
 	if (srv_use_native_aio) {
 		return(true);
@@ -6265,7 +6262,7 @@ AIO::reserve_slot(
 	}
 
 	slot->is_reserved = true;
-	slot->reservation_time = ut_time();
+	slot->reservation_time = time(NULL);
 	slot->m1       = m1;
 	slot->m2       = m2;
 	slot->file     = file;
@@ -6273,7 +6270,7 @@ AIO::reserve_slot(
 #ifdef _WIN32
 	slot->len      = static_cast<DWORD>(len);
 #else
-	slot->len      = static_cast<ulint>(len);
+	slot->len      = len;
 #endif /* _WIN32 */
 	slot->type     = type;
 	slot->buf      = static_cast<byte*>(buf);
@@ -7075,7 +7072,7 @@ private:
 	{
 		ulint	age;
 
-		age = (ulint) difftime(ut_time(), slot->reservation_time);
+		age = (ulint) difftime(time(NULL), slot->reservation_time);
 
 		if ((age >= 2 && age > m_oldest)
 		    || (age >= 2
@@ -7477,7 +7474,7 @@ os_aio_print(FILE*	file)
 	AIO::print_all(file);
 
 	putc('\n', file);
-	current_time = ut_time();
+	current_time = time(NULL);
 	time_elapsed = 0.001 + difftime(current_time, os_last_printout);
 
 	fprintf(file,
@@ -7543,7 +7540,7 @@ os_aio_refresh_stats()
 
 	os_bytes_read_since_printout = 0;
 
-	os_last_printout = ut_time();
+	os_last_printout = time(NULL);
 }
 
 /** Checks that all slots in the system have been freed, that is, there are

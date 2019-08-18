@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "debug_sync.h"  // DEBUG_SYNC
@@ -147,15 +147,11 @@ fk_truncate_illegal_if_parent(THD *thd, TABLE *table)
   /* Loop over the set of foreign keys for which this table is a parent. */
   while ((fk_info= it++))
   {
-    DBUG_ASSERT(!lex_string_cmp(system_charset_info,
-                                fk_info->referenced_db,
-                                &table->s->db));
-
-    DBUG_ASSERT(!lex_string_cmp(system_charset_info,
-                                fk_info->referenced_table,
-                                &table->s->table_name));
-
-    if (lex_string_cmp(system_charset_info, fk_info->foreign_db,
+    if (lex_string_cmp(system_charset_info, fk_info->referenced_db,
+                       &table->s->db) ||
+        lex_string_cmp(system_charset_info, fk_info->referenced_table,
+                       &table->s->table_name) ||
+        lex_string_cmp(system_charset_info, fk_info->foreign_db,
                        &table->s->db) ||
         lex_string_cmp(system_charset_info, fk_info->foreign_table,
                        &table->s->table_name))
@@ -299,7 +295,7 @@ bool Sql_cmd_truncate_table::lock_table(THD *thd, TABLE_LIST *table_ref,
   if (thd->locked_tables_mode)
   {
     if (!(table= find_table_for_mdl_upgrade(thd, table_ref->db.str,
-                                            table_ref->table_name.str, FALSE)))
+                                            table_ref->table_name.str, NULL)))
       DBUG_RETURN(TRUE);
 
     *hton_can_recreate= ha_check_storage_engine_flag(table->file->ht,
@@ -400,6 +396,8 @@ bool Sql_cmd_truncate_table::truncate_table(THD *thd, TABLE_LIST *table_ref)
   {
     /* In RBR, the statement is not binlogged if the table is temporary. */
     binlog_stmt= !thd->is_current_stmt_binlog_format_row();
+
+    thd->close_unused_temporary_table_instances(table_ref);
 
     error= handler_truncate(thd, table_ref, TRUE);
 

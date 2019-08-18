@@ -14,7 +14,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /* classes for sum functions */
@@ -1025,10 +1025,35 @@ class Item_sum_std :public Item_sum_variance
   { return get_item_copy<Item_sum_std>(thd, this); }
 };
 
+
+class Item_sum_hybrid: public Item_sum,
+                       public Type_handler_hybrid_field_type
+{
+public:
+  Item_sum_hybrid(THD *thd, Item *item_par):
+    Item_sum(thd, item_par),
+    Type_handler_hybrid_field_type(&type_handler_longlong)
+  { collation.set(&my_charset_bin); }
+  Item_sum_hybrid(THD *thd, Item *a, Item *b):
+    Item_sum(thd, a, b),
+    Type_handler_hybrid_field_type(&type_handler_longlong)
+  { collation.set(&my_charset_bin); }
+  Item_sum_hybrid(THD *thd, Item_sum_hybrid *item)
+    :Item_sum(thd, item),
+    Type_handler_hybrid_field_type(item)
+  { }
+  const Type_handler *type_handler() const
+  { return Type_handler_hybrid_field_type::type_handler(); }
+  bool fix_length_and_dec_generic();
+  bool fix_length_and_dec_numeric(const Type_handler *h);
+  bool fix_length_and_dec_string();
+};
+
+
 // This class is a string or number function depending on num_func
 class Arg_comparator;
 class Item_cache;
-class Item_sum_hybrid :public Item_sum, public Type_handler_hybrid_field_type
+class Item_sum_min_max :public Item_sum_hybrid
 {
 protected:
   bool direct_added;
@@ -1039,16 +1064,14 @@ protected:
   bool was_values;  // Set if we have found at least one row (for max/min only)
   bool was_null_value;
 
-  public:
-  Item_sum_hybrid(THD *thd, Item *item_par,int sign):
-    Item_sum(thd, item_par),
-    Type_handler_hybrid_field_type(&type_handler_longlong),
+public:
+  Item_sum_min_max(THD *thd, Item *item_par,int sign):
+    Item_sum_hybrid(thd, item_par),
     direct_added(FALSE), value(0), arg_cache(0), cmp(0),
     cmp_sign(sign), was_values(TRUE)
   { collation.set(&my_charset_bin); }
-  Item_sum_hybrid(THD *thd, Item_sum_hybrid *item)
-    :Item_sum(thd, item),
-    Type_handler_hybrid_field_type(item),
+  Item_sum_min_max(THD *thd, Item_sum_min_max *item)
+    :Item_sum_hybrid(thd, item),
     direct_added(FALSE), value(item->value), arg_cache(0),
     cmp_sign(item->cmp_sign), was_values(item->was_values)
   { }
@@ -1067,8 +1090,6 @@ protected:
   {
     return get_arg(0)->real_type_handler();
   }
-  const Type_handler *type_handler() const
-  { return Type_handler_hybrid_field_type::type_handler(); }
   TYPELIB *get_typelib() const { return args[0]->get_typelib(); }
   void update_field();
   void min_max_update_str_field();
@@ -1084,11 +1105,11 @@ protected:
 };
 
 
-class Item_sum_min :public Item_sum_hybrid
+class Item_sum_min :public Item_sum_min_max
 {
 public:
-  Item_sum_min(THD *thd, Item *item_par): Item_sum_hybrid(thd, item_par, 1) {}
-  Item_sum_min(THD *thd, Item_sum_min *item) :Item_sum_hybrid(thd, item) {}
+  Item_sum_min(THD *thd, Item *item_par): Item_sum_min_max(thd, item_par, 1) {}
+  Item_sum_min(THD *thd, Item_sum_min *item) :Item_sum_min_max(thd, item) {}
   enum Sumfunctype sum_func () const {return MIN_FUNC;}
 
   bool add();
@@ -1099,11 +1120,11 @@ public:
 };
 
 
-class Item_sum_max :public Item_sum_hybrid
+class Item_sum_max :public Item_sum_min_max
 {
 public:
-  Item_sum_max(THD *thd, Item *item_par): Item_sum_hybrid(thd, item_par, -1) {}
-  Item_sum_max(THD *thd, Item_sum_max *item) :Item_sum_hybrid(thd, item) {}
+  Item_sum_max(THD *thd, Item *item_par): Item_sum_min_max(thd, item_par, -1) {}
+  Item_sum_max(THD *thd, Item_sum_max *item) :Item_sum_min_max(thd, item) {}
   enum Sumfunctype sum_func () const {return MAX_FUNC;}
 
   bool add();
@@ -1750,6 +1771,7 @@ class Item_func_group_concat : public Item_sum
   String *separator;
   TREE tree_base;
   TREE *tree;
+  size_t tree_len;
   Item **ref_pointer_array;
 
   /**
@@ -1796,6 +1818,9 @@ class Item_func_group_concat : public Item_sum
   friend int dump_leaf_key(void* key_arg,
                            element_count count __attribute__((unused)),
 			   void* item_arg);
+
+  bool repack_tree(THD *thd);
+
 public:
   Item_func_group_concat(THD *thd, Name_resolution_context *context_arg,
                          bool is_distinct, List<Item> *is_select,
@@ -1852,8 +1877,8 @@ public:
   String* val_str(String* str);
   Item *copy_or_same(THD* thd);
   void no_rows_in_result() {}
-  virtual void print(String *str, enum_query_type query_type);
-  virtual bool change_context_processor(void *cntx)
+  void print(String *str, enum_query_type query_type);
+  bool change_context_processor(void *cntx)
     { context= (Name_resolution_context *)cntx; return FALSE; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_func_group_concat>(thd, this); }

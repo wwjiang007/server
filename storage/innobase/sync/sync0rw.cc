@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -20,7 +20,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -32,15 +32,6 @@ Created 9/11/1995 Heikki Tuuri
 *******************************************************/
 
 #include "sync0rw.h"
-#include "ha_prototypes.h"
-
-#include "os0thread.h"
-#include "mem0mem.h"
-#include "srv0srv.h"
-#include "os0event.h"
-#include "srv0mon.h"
-#include "sync0debug.h"
-#include "ha_prototypes.h"
 #include "my_cpu.h"
 #include <my_sys.h>
 
@@ -248,9 +239,6 @@ rw_lock_create_func(
 
 	mutex_enter(&rw_lock_list_mutex);
 
-	ut_ad(UT_LIST_GET_FIRST(rw_lock_list) == NULL
-	      || UT_LIST_GET_FIRST(rw_lock_list)->magic_n == RW_LOCK_MAGIC_N);
-
 	UT_LIST_ADD_FIRST(rw_lock_list, lock);
 
 	mutex_exit(&rw_lock_list_mutex);
@@ -278,12 +266,6 @@ rw_lock_free_func(
 	UT_LIST_REMOVE(rw_lock_list, lock);
 
 	mutex_exit(&rw_lock_list_mutex);
-
-	/* We did an in-place new in rw_lock_create_func() */
-	ut_d(lock->~rw_lock_t());
-	/* Sometimes (maybe when compiled with GCC -O3) the above call
-	to rw_lock_t::~rw_lock_t() will not actually assign magic_n=0. */
-	ut_d(lock->magic_n = 0);
 }
 
 /******************************************************************//**
@@ -485,14 +467,6 @@ rw_lock_x_lock_wait_func(
 
 	if (count_os_wait > 0) {
 		lock->count_os_wait += static_cast<uint32_t>(count_os_wait);
-		rw_lock_stats.rw_x_os_wait_count.add(count_os_wait);
-	}
-
-	rw_lock_stats.rw_x_spin_round_count.add(n_spins);
-
-	if (count_os_wait > 0) {
-		lock->count_os_wait +=
-			static_cast<uint32_t>(count_os_wait);
 		rw_lock_stats.rw_x_os_wait_count.add(count_os_wait);
 	}
 }
@@ -879,7 +853,6 @@ rw_lock_validate(
 	lock_word = my_atomic_load32_explicit(const_cast<int32_t*>(&lock->lock_word),
 					      MY_MEMORY_ORDER_RELAXED);
 
-	ut_ad(lock->magic_n == RW_LOCK_MAGIC_N);
 	ut_ad(my_atomic_load32_explicit(const_cast<int32_t*>(&lock->waiters),
 					MY_MEMORY_ORDER_RELAXED) < 2);
 	ut_ad(lock_word > -(2 * X_LOCK_DECR));

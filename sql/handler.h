@@ -1,8 +1,8 @@
 #ifndef HANDLER_INCLUDED
 #define HANDLER_INCLUDED
 /*
-   Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2018, MariaDB
+   Copyright (c) 2000, 2019, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2019, MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -16,7 +16,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /* Definitions for parameters to do with handler-routines */
@@ -151,7 +151,6 @@ enum enum_alter_inplace_result {
 #define HA_HAS_OLD_CHECKSUM    (1ULL << 24)
 /* Table data are stored in separate files (for lower_case_table_names) */
 #define HA_FILE_BASED	       (1ULL << 26)
-#define HA_NO_VARCHAR	       (1ULL << 27) /* unused */
 #define HA_CAN_BIT_FIELD       (1ULL << 28) /* supports bit fields */
 #define HA_NEED_READ_RANGE_BUFFER (1ULL << 29) /* for read_multi_range */
 #define HA_ANY_INDEX_MAY_BE_UNIQUE (1ULL << 30)
@@ -302,6 +301,9 @@ enum enum_alter_inplace_result {
 /* calling cmp_ref() on the engine is expensive */
 #define HA_CMP_REF_IS_EXPENSIVE (1ULL << 54)
 
+/* Engine wants primary keys for everything except sequences */
+#define HA_WANTS_PRIMARY_KEY (1ULL << 55)
+
 /* bits in index_flags(index_number) for what you can do with index */
 #define HA_READ_NEXT            1       /* TODO really use this flag */
 #define HA_READ_PREV            2       /* supports ::index_prev */
@@ -412,6 +414,12 @@ enum enum_alter_inplace_result {
 	/* Some key definitions */
 #define HA_KEY_NULL_LENGTH	1
 #define HA_KEY_BLOB_LENGTH	2
+
+/* Maximum length of any index lookup key, in bytes */
+
+#define MAX_KEY_LENGTH (MAX_DATA_LENGTH_FOR_KEY \
+                         +(MAX_REF_PARTS \
+                          *(HA_KEY_NULL_LENGTH + HA_KEY_BLOB_LENGTH)))
 
 #define HA_LEX_CREATE_TMP_TABLE	1U
 #define HA_CREATE_TMP_ALTER     8U
@@ -713,6 +721,11 @@ typedef ulonglong alter_table_operations;
 */
 #define ALTER_PARTITIONED                    (1ULL << 59)
 
+/**
+   Change in index length such that it doesn't require index rebuild.
+*/
+#define ALTER_COLUMN_INDEX_LENGTH            (1ULL << 60)
+
 /*
   Flags set in partition_flags when altering partitions
 */
@@ -1000,7 +1013,7 @@ typedef bool (stat_print_fn)(THD *thd, const char *type, size_t type_len,
                              const char *file, size_t file_len,
                              const char *status, size_t status_len);
 enum ha_stat_type { HA_ENGINE_STATUS, HA_ENGINE_LOGS, HA_ENGINE_MUTEX };
-extern st_plugin_int *hton2plugin[MAX_HA];
+extern MYSQL_PLUGIN_IMPORT st_plugin_int *hton2plugin[MAX_HA];
 
 /* Transaction log maintains type definitions */
 enum log_status
@@ -1906,13 +1919,22 @@ enum vers_sys_type_t
   VERS_TRX_ID
 };
 
+extern const LEX_CSTRING null_clex_str;
+
 struct Vers_parse_info
 {
   Vers_parse_info() :
-    check_unit(VERS_UNDEFINED),
     versioned_fields(false),
     unversioned_fields(false)
   {}
+
+  void init() // Deep initialization
+  {
+    system_time= start_end_t(null_clex_str, null_clex_str);
+    as_row= start_end_t(null_clex_str, null_clex_str);
+    versioned_fields= false;
+    unversioned_fields= false;
+  }
 
   struct start_end_t
   {
@@ -1927,7 +1949,6 @@ struct Vers_parse_info
 
   start_end_t system_time;
   start_end_t as_row;
-  vers_sys_type_t check_unit;
 
   void set_system_time(Lex_ident start, Lex_ident end)
   {
@@ -1968,8 +1989,8 @@ public:
   bool fix_create_like(Alter_info &alter_info, HA_CREATE_INFO &create_info,
                        TABLE_LIST &src_table, TABLE_LIST &table);
   bool check_sys_fields(const Lex_table_name &table_name,
-                        const Lex_table_name &db,
-                        Alter_info *alter_info, bool native);
+                        const Lex_table_name &db, Alter_info *alter_info,
+                        bool can_native) const;
 
   /**
      At least one field was specified 'WITH/WITHOUT SYSTEM VERSIONING'.
@@ -1993,7 +2014,7 @@ public:
      - [AS] SELECT ...             // Copy structure from a subquery
 */
 
-struct Table_scope_and_contents_source_st
+struct Table_scope_and_contents_source_pod_st // For trivial members
 {
   CHARSET_INFO *table_charset;
   LEX_CUSTRING tabledef_version;
@@ -2019,7 +2040,6 @@ struct Table_scope_and_contents_source_st
   uint options;				/* OR of HA_CREATE_ options */
   uint merge_insert_method;
   uint extra_size;                      /* length of extra data segment */
-  SQL_I_List<TABLE_LIST> merge_list;
   handlerton *db_type;
   /**
     Row type of the table definition.
@@ -2049,20 +2069,10 @@ struct Table_scope_and_contents_source_st
   /* The following is used to remember the old state for CREATE OR REPLACE */
   TABLE *table;
   TABLE_LIST *pos_in_locked_tables;
+  TABLE_LIST *merge_list;
   MDL_ticket *mdl_ticket;
   bool table_was_deleted;
   sequence_definition *seq_create_info;
-
-  Vers_parse_info vers_info;
-
-  bool vers_fix_system_fields(THD *thd, Alter_info *alter_info,
-                         const TABLE_LIST &create_table,
-                         bool create_select= false);
-
-  bool vers_check_system_fields(THD *thd, Alter_info *alter_info,
-                                const TABLE_LIST &create_table);
-
-  bool vers_native(THD *thd) const;
 
   void init()
   {
@@ -2079,6 +2089,27 @@ struct Table_scope_and_contents_source_st
   {
     return options & HA_VERSIONED_TABLE;
   }
+};
+
+
+struct Table_scope_and_contents_source_st:
+         public Table_scope_and_contents_source_pod_st
+{
+  Vers_parse_info vers_info;
+
+  void init()
+  {
+    Table_scope_and_contents_source_pod_st::init();
+    vers_info.init();
+  }
+
+  bool vers_fix_system_fields(THD *thd, Alter_info *alter_info,
+                         const TABLE_LIST &create_table,
+                         bool create_select= false);
+
+  bool vers_check_system_fields(THD *thd, Alter_info *alter_info,
+                                const TABLE_LIST &create_table);
+
 };
 
 
@@ -2185,6 +2216,7 @@ public:
   inplace_alter_handler_ctx() {}
 
   virtual ~inplace_alter_handler_ctx() {}
+  virtual void set_shared_data(const inplace_alter_handler_ctx& ctx) {}
 };
 
 
@@ -2746,6 +2778,7 @@ public:
   time_t check_time;
   time_t update_time;
   uint block_size;			/* index block size */
+  ha_checksum checksum;
 
   /*
     number of buffer bytes that native mrr implementation needs,
@@ -3420,6 +3453,10 @@ public:
             ha_pre_index_end() :
             pre_inited == RND ? ha_pre_rnd_end() : 0 );
   }
+  virtual bool vers_can_native(THD *thd)
+  {
+    return ht->flags & HTON_NATIVE_SYS_VERSIONING;
+  }
 
   /**
      @brief
@@ -3755,18 +3792,18 @@ public:
   uint max_key_parts() const
   { return MY_MIN(MAX_REF_PARTS, max_supported_key_parts()); }
   uint max_key_length() const
-  { return MY_MIN(MAX_KEY_LENGTH, max_supported_key_length()); }
+  { return MY_MIN(MAX_DATA_LENGTH_FOR_KEY, max_supported_key_length()); }
   uint max_key_part_length() const
-  { return MY_MIN(MAX_KEY_LENGTH, max_supported_key_part_length()); }
+  { return MY_MIN(MAX_DATA_LENGTH_FOR_KEY, max_supported_key_part_length()); }
 
   virtual uint max_supported_record_length() const { return HA_MAX_REC_LENGTH; }
   virtual uint max_supported_keys() const { return 0; }
   virtual uint max_supported_key_parts() const { return MAX_REF_PARTS; }
-  virtual uint max_supported_key_length() const { return MAX_KEY_LENGTH; }
+  virtual uint max_supported_key_length() const { return MAX_DATA_LENGTH_FOR_KEY; }
   virtual uint max_supported_key_part_length() const { return 255; }
   virtual uint min_record_length(uint options) const { return 1; }
 
-  virtual uint checksum() const { return 0; }
+  virtual int calculate_checksum();
   virtual bool is_crashed() const  { return 0; }
   virtual bool auto_repair(int error) const { return 0; }
 
@@ -4332,6 +4369,12 @@ protected:
 public:
   bool check_table_binlog_row_based(bool binlog_row);
 
+  inline void clear_cached_table_binlog_row_based_flag()
+  {
+    check_table_binlog_row_based_done= 0;
+    check_table_binlog_row_based_result= 0;
+  }
+private:
   /* Cache result to avoid extra calls */
   inline void mark_trx_read_write()
   {
@@ -4577,7 +4620,6 @@ public:
   virtual int enable_indexes(uint mode) { return HA_ERR_WRONG_COMMAND; }
   virtual int discard_or_import_tablespace(my_bool discard)
   { return (my_errno=HA_ERR_WRONG_COMMAND); }
-  virtual void prepare_for_alter() { return; }
   virtual void drop_table(const char *name);
   virtual int create(const char *name, TABLE *form, HA_CREATE_INFO *info)=0;
 

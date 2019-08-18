@@ -11,7 +11,7 @@
 # 
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335 USA
 
 SET(MAN1_SERVER innochecksum.1 my_print_defaults.1 myisam_ftdump.1 myisamchk.1
                 aria_chk.1 aria_dump_log.1 aria_ftdump.1 aria_pack.1 aria_read_log.1
@@ -25,7 +25,6 @@ SET(MAN1_SERVER innochecksum.1 my_print_defaults.1 myisam_ftdump.1 myisamchk.1
 		resolveip.1 mariadb-service-convert.1
 		mysqld_safe_helper.1 tokuftdump.1 wsrep_sst_common.1
 		wsrep_sst_mysqldump.1 wsrep_sst_rsync.1
-		wsrep_sst_xtrabackup-v2.1 wsrep_sst_xtrabackup.1
 		galera_recovery.1 galera_new_cluster.1 tokuft_logprint.1
 		mysql_ldb.1
 		wsrep_sst_mariabackup.1 mbstream.1 mariabackup.1

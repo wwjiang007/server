@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "strings_def.h"
 #include <m_ctype.h>
@@ -492,7 +492,6 @@ ulong my_strntoul_8bit(CHARSET_INFO *cs,
   register uint cutlim;
   register uint32 i;
   register const char *s;
-  register uchar c;
   const char *save, *e;
   int overflow;
 
@@ -527,8 +526,9 @@ ulong my_strntoul_8bit(CHARSET_INFO *cs,
   overflow = 0;
   i = 0;
   
-  for (c = *s; s != e; c = *++s)
+  for ( ; s != e; ++s)
   {
+    register uchar c= *s;
     if (c>='0' && c<='9')
       c -= '0';
     else if (c>='A' && c<='Z')

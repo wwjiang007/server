@@ -14,7 +14,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
   Because of the function make_new_field() all field classes that have static
@@ -563,6 +563,7 @@ public:
   bool utf8;                                    /* Already in utf8 */
   Item *expr;
   LEX_CSTRING name;                             /* Name of constraint */
+  /* see VCOL_* (VCOL_FIELD_REF, ...) */
   uint flags;
 
   Virtual_column_info()
@@ -1494,6 +1495,17 @@ public:
   /* Hash value */
   virtual void hash(ulong *nr, ulong *nr2);
 
+  /**
+    Get the upper limit of the MySQL integral and floating-point type.
+
+    @return maximum allowed value for the field
+  */
+  virtual ulonglong get_max_int_value() const
+  {
+    DBUG_ASSERT(false);
+    return 0ULL;
+  }
+
 /**
   Checks whether a string field is part of write_set.
 
@@ -1696,13 +1708,6 @@ public:
   {
     return to->store(val_int(), MY_TEST(flags & UNSIGNED_FLAG));
   }
-  bool memcpy_field_possible(const Field *from) const
-  {
-    return real_type() == from->real_type() &&
-           pack_length() == from->pack_length() &&
-           !((flags & UNSIGNED_FLAG) && !(from->flags & UNSIGNED_FLAG)) &&
-           decimals() == from->decimals();
-  }
   uint is_equal(Create_field *new_field);
   uint row_pack_length() const { return pack_length(); }
   uint32 pack_length_from_metadata(uint field_metadata) {
@@ -1880,7 +1885,10 @@ public:
       e.g. a DOUBLE(53,10) into a DOUBLE(10,10).
       But it should be OK the other way around.
     */
-    return Field_num::memcpy_field_possible(from) &&
+    return real_type() == from->real_type() &&
+           pack_length() == from->pack_length() &&
+           is_unsigned() <= from->is_unsigned() &&
+           decimals() == from->decimals() &&
            field_length >= from->field_length;
   }
   int store_decimal(const my_decimal *);
@@ -1971,7 +1979,10 @@ public:
   }
   bool memcpy_field_possible(const Field *from) const
   {
-    return Field_num::memcpy_field_possible(from) &&
+    return real_type() == from->real_type() &&
+           pack_length() == from->pack_length() &&
+           is_unsigned() <= from->is_unsigned() &&
+           decimals() == from->decimals() &&
            field_length == from->field_length;
   }
   int  reset(void);
@@ -2029,6 +2040,12 @@ public:
     :Field_num(ptr_arg, len_arg, null_ptr_arg, null_bit_arg,
                unireg_check_arg, field_name_arg, 0, zero_arg, unsigned_arg)
     {}
+  bool memcpy_field_possible(const Field *from) const
+  {
+    return real_type() == from->real_type() &&
+           pack_length() == from->pack_length() &&
+           is_unsigned() == from->is_unsigned();
+  }
   int store_decimal(const my_decimal *);
   my_decimal *val_decimal(my_decimal *);
   bool val_bool() { return val_int() != 0; }
@@ -2115,6 +2132,10 @@ public:
     *to= *from;
     return from + 1;
   }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFULL : 0x7FULL;
+  }
 };
 
 
@@ -2159,6 +2180,10 @@ public:
   virtual const uchar *unpack(uchar* to, const uchar *from,
                               const uchar *from_end, uint param_data)
   { return unpack_int16(to, from, from_end); }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFULL : 0x7FFFULL;
+  }
 };
 
 class Field_medium :public Field_int
@@ -2193,6 +2218,10 @@ public:
   virtual uchar *pack(uchar* to, const uchar *from, uint max_length)
   {
     return Field::pack(to, from, max_length);
+  }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFFFULL : 0x7FFFFFULL;
   }
 };
 
@@ -2242,6 +2271,10 @@ public:
                               uint param_data __attribute__((unused)))
   {
     return unpack_int32(to, from, from_end);
+  }
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFFFFFULL : 0x7FFFFFFFULL;
   }
 };
 
@@ -2297,6 +2330,10 @@ public:
   }
   void set_max();
   bool is_max();
+  virtual ulonglong get_max_int_value() const
+  {
+    return unsigned_flag ? 0xFFFFFFFFFFFFFFFFULL : 0x7FFFFFFFFFFFFFFFULL;
+  }
 };
 
 
@@ -2379,6 +2416,13 @@ public:
   uint32 pack_length() const { return sizeof(float); }
   uint row_pack_length() const { return pack_length(); }
   void sql_type(String &str) const;
+  virtual ulonglong get_max_int_value() const
+  {
+    /*
+      We use the maximum as per IEEE754-2008 standard, 2^24
+    */
+    return 0x1000000ULL;
+  }
 private:
   int save_field_metadata(uchar *first_byte);
 };
@@ -2432,6 +2476,13 @@ public:
   uint32 pack_length() const { return sizeof(double); }
   uint row_pack_length() const { return pack_length(); }
   void sql_type(String &str) const;
+  virtual ulonglong get_max_int_value() const
+  {
+    /*
+      We use the maximum as per IEEE754-2008 standard, 2^53
+    */
+    return 0x20000000000000ULL;
+  }
 private:
   int save_field_metadata(uchar *first_byte);
 };
@@ -4513,6 +4564,10 @@ public:
     *this= *def;
   }
   bool set_compressed(const char *method);
+  bool set_compressed_deprecated(THD *thd, const char *method);
+  bool set_compressed_deprecated_column_attribute(THD *thd,
+                                                  const char *pos,
+                                                  const char *method);
   void set_compression_method(Compression_method *compression_method_arg)
   { compression_method_ptr= compression_method_arg; }
   Compression_method *compression_method() const

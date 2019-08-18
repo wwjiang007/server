@@ -11,10 +11,11 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "mariadb.h"
 #include "wsrep_sst.h"
+#include <inttypes.h>
 #include <mysqld.h>
 #include <m_ctype.h>
 #include <strfunc.h>
@@ -36,8 +37,14 @@ static char wsrep_defaults_file[FN_REFLEN * 2 + 10 + 30 +
                                 sizeof(WSREP_SST_OPT_CONF_SUFFIX) +
                                 sizeof(WSREP_SST_OPT_CONF_EXTRA)] = {0};
 
+const char* wsrep_sst_method          = WSREP_SST_DEFAULT;
+const char* wsrep_sst_receive_address = WSREP_SST_ADDRESS_AUTO;
+const char* wsrep_sst_donor           = "";
+const char* wsrep_sst_auth            = NULL;
+
 // container for real auth string
 static const char* sst_auth_real      = NULL;
+my_bool wsrep_sst_donor_rejects_queries = FALSE;
 
 bool wsrep_sst_method_check (sys_var *self, THD* thd, set_var* var)
 {
@@ -53,14 +60,8 @@ bool wsrep_sst_method_check (sys_var *self, THD* thd, set_var* var)
   return 0;
 }
 
-bool wsrep_sst_method_update (sys_var *self, THD* thd, enum_var_type type)
-{
-    return 0;
-}
-
 static const char* data_home_dir = NULL;
 
-extern "C"
 void wsrep_set_data_home_dir(const char *data_dir)
 {
   data_home_dir= (data_dir && *data_dir) ? data_dir : NULL;
@@ -156,7 +157,7 @@ void wsrep_sst_auth_free()
 
 bool wsrep_sst_auth_update (sys_var *self, THD* thd, enum_var_type type)
 {
-    return sst_auth_real_set (wsrep_sst_auth);
+  return sst_auth_real_set (wsrep_sst_auth);
 }
 
 void wsrep_sst_auth_init ()
@@ -171,7 +172,7 @@ bool  wsrep_sst_donor_check (sys_var *self, THD* thd, set_var* var)
 
 bool wsrep_sst_donor_update (sys_var *self, THD* thd, enum_var_type type)
 {
-    return 0;
+  return 0;
 }
 
 bool wsrep_before_SE()
@@ -217,9 +218,9 @@ bool wsrep_sst_wait ()
     if (!sst_complete)
     {
       total_wtime += difftime(end_time, start_time);
-      WSREP_DEBUG("Waiting for SST to complete. current seqno: %ld waited %f secs.", local_seqno, total_wtime);
+      WSREP_DEBUG("Waiting for SST to complete. current seqno: %" PRId64 " waited %f secs.", local_seqno, total_wtime);
       service_manager_extend_timeout(WSREP_EXTEND_TIMEOUT_INTERVAL,
-        "WSREP state transfer ongoing, current seqno: %ld waited %f secs", local_seqno, total_wtime);
+        "WSREP state transfer ongoing, current seqno: %" PRId64 " waited %f secs", local_seqno, total_wtime);
     }
   }
 
@@ -303,7 +304,7 @@ bool wsrep_sst_received (wsrep_t*            const wsrep,
   }
 
   if (memcmp(&local_uuid, &uuid, sizeof(wsrep_uuid_t)) ||
-      local_seqno < seqno)
+      local_seqno < seqno || seqno < 0)
   {
     do_update= true;
   }
@@ -445,6 +446,22 @@ static int generate_binlog_opt_val(char** ret)
     assert(opt_bin_logname);
     *ret= strcmp(opt_bin_logname, "0") ?
       my_strdup(opt_bin_logname, MYF(0)) : my_strdup("", MYF(0));
+  }
+  else
+  {
+    *ret= my_strdup("", MYF(0));
+  }
+  if (!*ret) return -ENOMEM;
+  return 0;
+}
+
+static int generate_binlog_index_opt_val(char** ret)
+{
+  DBUG_ASSERT(ret);
+  *ret= NULL;
+  if (opt_binlog_index_name) {
+    *ret= strcmp(opt_binlog_index_name, "0") ?
+      my_strdup(opt_binlog_index_name, MYF(0)) : my_strdup("", MYF(0));
   }
   else
   {
@@ -641,7 +658,9 @@ static ssize_t sst_prepare_other (const char*  method,
   }
 
   const char* binlog_opt= "";
+  const char* binlog_index_opt= "";
   char* binlog_opt_val= NULL;
+  char* binlog_index_opt_val= NULL;
 
   int ret;
   if ((ret= generate_binlog_opt_val(&binlog_opt_val)))
@@ -650,7 +669,15 @@ static ssize_t sst_prepare_other (const char*  method,
                 ret);
     return ret;
   }
+
+  if ((ret= generate_binlog_index_opt_val(&binlog_index_opt_val)))
+  {
+    WSREP_ERROR("sst_prepare_other(): generate_binlog_index_opt_val() failed %d",
+                ret);
+  }
+
   if (strlen(binlog_opt_val)) binlog_opt= WSREP_SST_OPT_BINLOG;
+  if (strlen(binlog_index_opt_val)) binlog_index_opt= WSREP_SST_OPT_BINLOG_INDEX;
 
   make_wsrep_defaults_file();
 
@@ -661,11 +688,14 @@ static ssize_t sst_prepare_other (const char*  method,
                  WSREP_SST_OPT_DATA " '%s' "
                  " %s "
                  WSREP_SST_OPT_PARENT " '%d'"
-                 " %s '%s' ",
+                 " %s '%s'"
+	         " %s '%s'",
                  method, addr_in, mysql_real_data_home,
                  wsrep_defaults_file,
-                 (int)getpid(), binlog_opt, binlog_opt_val);
+                 (int)getpid(), binlog_opt, binlog_opt_val,
+                 binlog_index_opt, binlog_index_opt_val);
   my_free(binlog_opt_val);
+  my_free(binlog_index_opt_val);
 
   if (ret < 0 || ret >= cmd_len)
   {
@@ -699,10 +729,10 @@ static ssize_t sst_prepare_other (const char*  method,
   pthread_t tmp;
   sst_thread_arg arg(cmd_str(), env());
   mysql_mutex_lock (&arg.lock);
-  ret = pthread_create (&tmp, NULL, sst_joiner_thread, &arg);
+  ret = mysql_thread_create (key_wsrep_sst_joiner, &tmp, NULL, sst_joiner_thread, &arg);
   if (ret)
   {
-    WSREP_ERROR("sst_prepare_other(): pthread_create() failed: %d (%s)",
+    WSREP_ERROR("sst_prepare_other(): mysql_thread_create() failed: %d (%s)",
                 ret, strerror(ret));
     return -ret;
   }
@@ -768,6 +798,7 @@ ssize_t wsrep_sst_prepare (void** msg)
 {
   const char* addr_in=  NULL;
   const char* addr_out= NULL;
+  const char* method;
 
   if (!strcmp(wsrep_sst_method, WSREP_SST_SKIP))
   {
@@ -826,7 +857,8 @@ ssize_t wsrep_sst_prepare (void** msg)
   }
 
   ssize_t addr_len= -ENOSYS;
-  if (!strcmp(wsrep_sst_method, WSREP_SST_MYSQLDUMP))
+  method = wsrep_sst_method;
+  if (!strcmp(method, WSREP_SST_MYSQLDUMP))
   {
     addr_len= sst_prepare_mysqldump (addr_in, &addr_out);
     if (addr_len < 0) unireg_abort(1);
@@ -836,6 +868,13 @@ ssize_t wsrep_sst_prepare (void** msg)
     /*! A heuristic workaround until we learn how to stop and start engines */
     if (SE_initialized)
     {
+      if (!strcmp(method, WSREP_SST_XTRABACKUP) ||
+          !strcmp(method, WSREP_SST_XTRABACKUPV2))
+      {
+         WSREP_WARN("The %s SST method is deprecated, so it is automatically "
+                    "replaced by %s", method, WSREP_SST_MARIABACKUP);
+         method = WSREP_SST_MARIABACKUP;
+      }
       // we already did SST at initializaiton, now engines are running
       // sql_print_information() is here because the message is too long
       // for WSREP_INFO.
@@ -845,28 +884,28 @@ ssize_t wsrep_sst_prepare (void** msg)
                  "Wsrep provider won't be able to fall back to it "
                  "if other means of state transfer are unavailable. "
                  "In that case you will need to restart the server.",
-                 wsrep_sst_method);
+                 method);
       *msg = 0;
       return 0;
     }
 
-    addr_len = sst_prepare_other (wsrep_sst_method, sst_auth_real,
+    addr_len = sst_prepare_other (method, sst_auth_real,
                                   addr_in, &addr_out);
     if (addr_len < 0)
     {
       WSREP_ERROR("Failed to prepare for '%s' SST. Unrecoverable.",
-                   wsrep_sst_method);
+                   method);
       unireg_abort(1);
     }
   }
 
-  size_t const method_len(strlen(wsrep_sst_method));
+  size_t const method_len(strlen(method));
   size_t const msg_len   (method_len + addr_len + 2 /* + auth_len + 1*/);
 
   *msg = malloc (msg_len);
   if (NULL != *msg) {
     char* const method_ptr(reinterpret_cast<char*>(*msg));
-    strcpy (method_ptr, wsrep_sst_method);
+    strcpy (method_ptr, method);
     char* const addr_ptr(method_ptr + method_len + 1);
     strcpy (addr_ptr, addr_out);
 
@@ -1342,10 +1381,10 @@ static int sst_donate_other (const char*   method,
   pthread_t tmp;
   sst_thread_arg arg(cmd_str(), env);
   mysql_mutex_lock (&arg.lock);
-  ret = pthread_create (&tmp, NULL, sst_donor_thread, &arg);
+  ret = mysql_thread_create (key_wsrep_sst_donor, &tmp, NULL, sst_donor_thread, &arg);
   if (ret)
   {
-    WSREP_ERROR("sst_donate_other(): pthread_create() failed: %d (%s)",
+    WSREP_ERROR("sst_donate_other(): mysql_thread_create() failed: %d (%s)",
                 ret, strerror(ret));
     return ret;
   }
@@ -1431,9 +1470,9 @@ void wsrep_SE_init_wait()
     if (!SE_initialized)
     {
       total_wtime += difftime(end_time, start_time);
-      WSREP_DEBUG("Waiting for SST to complete. current seqno: %ld waited %f secs.", local_seqno, total_wtime);
+      WSREP_DEBUG("Waiting for SST to complete. current seqno: %" PRId64 " waited %f secs.", local_seqno, total_wtime);
       service_manager_extend_timeout(WSREP_EXTEND_TIMEOUT_INTERVAL,
-        "WSREP state transfer ongoing, current seqno: %ld waited %f secs", local_seqno, total_wtime);
+        "WSREP state transfer ongoing, current seqno: %" PRId64 " waited %f secs", local_seqno, total_wtime);
     }
   }
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
 Copyright (c) 1994, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -12,7 +12,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -25,8 +25,6 @@ Created 2/2/1994 Heikki Tuuri
 
 #ifndef page0page_h
 #define page0page_h
-
-#include "univ.i"
 
 #include "page0types.h"
 #ifndef UNIV_INNOCHECKSUM
@@ -734,9 +732,7 @@ page_rec_get_heap_no(
 /** Determine whether a page has any siblings.
 @param[in]	page	page frame
 @return true if the page has any siblings */
-inline
-bool
-page_has_siblings(const page_t* page)
+inline bool page_has_siblings(const page_t* page)
 {
 	compile_time_assert(!(FIL_PAGE_PREV % 8));
 	compile_time_assert(FIL_PAGE_NEXT == FIL_PAGE_PREV + 4);
@@ -745,22 +741,10 @@ page_has_siblings(const page_t* page)
 		!= ~uint64_t(0);
 }
 
-/** Determine whether a page is an index root page.
-@param[in]	page	page frame
-@return true if the page is a root page of an index */
-inline
-bool
-page_is_root(const page_t* page)
-{
-	return fil_page_index_page_check(page) && !page_has_siblings(page);
-}
-
 /** Determine whether a page has a predecessor.
 @param[in]	page	page frame
 @return true if the page has a predecessor */
-inline
-bool
-page_has_prev(const page_t* page)
+inline bool page_has_prev(const page_t* page)
 {
 	return *reinterpret_cast<const uint32_t*>(page + FIL_PAGE_PREV)
 		!= FIL_NULL;
@@ -769,9 +753,7 @@ page_has_prev(const page_t* page)
 /** Determine whether a page has a successor.
 @param[in]	page	page frame
 @return true if the page has a successor */
-inline
-bool
-page_has_next(const page_t* page)
+inline bool page_has_next(const page_t* page)
 {
 	return *reinterpret_cast<const uint32_t*>(page + FIL_PAGE_NEXT)
 		!= FIL_NULL;
@@ -1352,17 +1334,6 @@ page_find_rec_with_heap_no(
 const rec_t*
 page_find_rec_max_not_deleted(
 	const page_t*	page);
-
-/** Issue a warning when the checksum that is stored in the page is valid,
-but different than the global setting innodb_checksum_algorithm.
-@param[in]	current_algo	current checksum algorithm
-@param[in]	page_checksum	page valid checksum
-@param[in]	page_id		page identifier */
-void
-page_warn_strict_checksum(
-	srv_checksum_algorithm_t	curr_algo,
-	srv_checksum_algorithm_t	page_checksum,
-	const page_id_t&		page_id);
 
 #ifdef UNIV_MATERIALIZE
 #undef UNIV_INLINE

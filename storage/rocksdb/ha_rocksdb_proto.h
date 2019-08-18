@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
 #pragma once
 
 /* C++ standard header files */
@@ -43,7 +43,7 @@ void rdb_handle_io_error(const rocksdb::Status status,
 #if defined(__clang__)
     MY_ATTRIBUTE((optnone));
 #else
-    MY_ATTRIBUTE((optimize("O0")));
+    MY_ATTRIBUTE((noinline,noclone));
 #endif
 
 int rdb_normalize_tablename(const std::string &tablename, std::string *str)
@@ -78,7 +78,7 @@ Rdb_cf_manager &rdb_get_cf_manager();
 const rocksdb::BlockBasedTableOptions &rdb_get_table_options();
 bool rdb_is_ttl_enabled();
 bool rdb_is_ttl_read_filtering_enabled();
-#ifndef NDEBUG
+#ifndef DBUG_OFF
 int rdb_dbug_set_ttl_rec_ts();
 int rdb_dbug_set_ttl_snapshot_ts();
 int rdb_dbug_set_ttl_read_filter_ts();
@@ -100,4 +100,4 @@ Rdb_ddl_manager *rdb_get_ddl_manager(void)
 class Rdb_binlog_manager;
 Rdb_binlog_manager *rdb_get_binlog_manager(void)
     MY_ATTRIBUTE((__warn_unused_result__));
-} // namespace myrocks
+}  // namespace myrocks

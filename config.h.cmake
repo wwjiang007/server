@@ -11,7 +11,7 @@
  
  You should have received a copy of the GNU General Public License
  along with this program; if not, write to the Free Software
- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef MY_CONFIG_H
 #define MY_CONFIG_H
@@ -187,8 +187,6 @@
 #cmakedefine HAVE_LINUX_FALLOC_H 1
 #cmakedefine HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE 1
 #cmakedefine HAVE_PREAD 1
-#cmakedefine HAVE_PAUSE_INSTRUCTION 1
-#cmakedefine HAVE_FAKE_PAUSE_INSTRUCTION 1
 #cmakedefine HAVE_RDTSCLL 1
 #cmakedefine HAVE_READ_REAL_TIME 1
 #cmakedefine HAVE_PTHREAD_ATTR_CREATE 1
@@ -444,7 +442,11 @@
 /*
   MySQL features
 */
-#cmakedefine ENABLED_LOCAL_INFILE 1
+#define LOCAL_INFILE_MODE_OFF  0
+#define LOCAL_INFILE_MODE_ON   1
+#define LOCAL_INFILE_MODE_AUTO 2
+#define ENABLED_LOCAL_INFILE LOCAL_INFILE_MODE_@ENABLED_LOCAL_INFILE@
+
 #cmakedefine ENABLED_PROFILING 1
 #cmakedefine EXTRA_DEBUG 1
 #cmakedefine USE_SYMDIR 1
@@ -559,12 +561,8 @@
 #cmakedefine WSREP_PROC_INFO 1
 #endif
 
-#ifdef _AIX
-/*
-  AIX includes inttypes.h from sys/types.h
-  Explicitly request format macros before the first inclusion of inttypes.h
-*/
+#if !defined(__STDC_FORMAT_MACROS)
 #define __STDC_FORMAT_MACROS
-#endif
+#endif  // !defined(__STDC_FORMAT_MACROS)
 
 #endif

@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -107,7 +107,7 @@ trx_read_roll_ptr(
 @return pointer to page x-latched */
 UNIV_INLINE
 page_t*
-trx_undo_page_get(const page_id_t& page_id, mtr_t* mtr);
+trx_undo_page_get(const page_id_t page_id, mtr_t* mtr);
 
 /** Gets an undo log page and s-latches it.
 @param[in]	page_id		page id
@@ -115,7 +115,7 @@ trx_undo_page_get(const page_id_t& page_id, mtr_t* mtr);
 @return pointer to page s-latched */
 UNIV_INLINE
 page_t*
-trx_undo_page_get_s_latched(const page_id_t& page_id, mtr_t* mtr);
+trx_undo_page_get_s_latched(const page_id_t page_id, mtr_t* mtr);
 
 /******************************************************************//**
 Returns the next undo log record on the page in the specified log, or

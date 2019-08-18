@@ -28,7 +28,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -42,19 +42,16 @@ Created 10/10/1995 Heikki Tuuri
 #ifndef srv0srv_h
 #define srv0srv_h
 
-#include "my_global.h"
-
-#include "mysql/psi/mysql_stage.h"
-#include "mysql/psi/psi.h"
-
-#include "univ.i"
+#include "log0log.h"
 #include "os0event.h"
 #include "que0types.h"
 #include "trx0types.h"
 #include "srv0conc.h"
 #include "buf0checksum.h"
-#include "ut0counter.h"
 #include "fil0fil.h"
+
+#include "mysql/psi/mysql_stage.h"
+#include "mysql/psi/psi.h"
 
 /** Global counters used inside InnoDB. */
 struct srv_stats_t
@@ -190,6 +187,12 @@ struct srv_stats_t
 
 	/** Number of spaces in keyrotation list */
 	ulint_ctr_64_t		key_rotation_list_length;
+
+	/** Number of temporary tablespace blocks encrypted */
+	ulint_ctr_64_t		n_temp_blocks_encrypted;
+
+	/** Number of temporary tablespace blocks decrypted */
+	ulint_ctr_64_t		n_temp_blocks_decrypted;
 };
 
 extern const char*	srv_main_thread_op_info;
@@ -478,6 +481,9 @@ extern ulong	srv_max_purge_lag;
 extern ulong	srv_max_purge_lag_delay;
 
 extern ulong	srv_replication_delay;
+
+extern my_bool	innodb_encrypt_temporary_tables;
+
 /*-------------------------------------------*/
 
 /** Modes of operation */
@@ -993,7 +999,7 @@ struct export_var_t{
 	ulint innodb_system_rows_inserted; /*!< srv_n_system_rows_inserted */
 	ulint innodb_system_rows_updated; /*!< srv_n_system_rows_updated */
 	ulint innodb_system_rows_deleted; /*!< srv_n_system_rows_deleted*/
-	ulint innodb_num_open_files;		/*!< fil_n_file_opened */
+	ulint innodb_num_open_files;		/*!< fil_system_t::n_open */
 	ulint innodb_truncated_status_writes;	/*!< srv_truncated_status_writes */
 	ulint innodb_available_undo_logs;       /*!< srv_available_undo_logs
 						*/
@@ -1045,6 +1051,12 @@ struct export_var_t{
 	/*!< Number of row log blocks decrypted */
 	ib_int64_t innodb_n_rowlog_blocks_decrypted;
 
+	/* Number of temporary tablespace pages encrypted */
+	ib_int64_t innodb_n_temp_blocks_encrypted;
+
+	/* Number of temporary tablespace pages decrypted */
+	ib_int64_t innodb_n_temp_blocks_decrypted;
+
 	ulint innodb_sec_rec_cluster_reads;	/*!< srv_sec_rec_cluster_reads */
 	ulint innodb_sec_rec_cluster_reads_avoided;/*!< srv_sec_rec_cluster_reads_avoided */
 
@@ -1074,10 +1086,14 @@ struct srv_slot_t{
 	ibool		suspended;		/*!< TRUE if the thread is
 						waiting for the event of this
 						slot */
-	ib_time_t	suspend_time;		/*!< time when the thread was
-						suspended. Initialized by
-						lock_wait_table_reserve_slot()
-						for lock wait */
+ 	/** time(NULL) when the thread was suspended.
+ 	FIXME: Use my_interval_timer() or similar, to avoid bogus
+ 	timeouts in lock_wait_check_and_cancel() or lock_wait_suspend_thread()
+	when the system time is adjusted to the past!
+
+	FIXME: This is duplicating trx_lock_t::wait_started,
+	which is being used for diagnostic purposes only. */
+	time_t		suspend_time;
 	ulong		wait_timeout;		/*!< wait time that if exceeded
 						the thread will be timed out.
 						Initialized by

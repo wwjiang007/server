@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2017, MariaDB Corporation.
+   Copyright (c) 2008, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include "sql_plugin.h"                         // Includes mariadb.h
 #include "sql_priv.h"
@@ -208,9 +208,6 @@ typedef fp_except fp_except_t;
 #ifndef HAVE_FCNTL
 #define fcntl(X,Y,Z) 0
 #endif
-
-extern "C" my_bool reopen_fstreams(const char *filename,
-                                   FILE *outstream, FILE *errstream);
 
 inline void setup_fpu()
 {
@@ -799,6 +796,7 @@ char *master_info_file;
 char *relay_log_info_file, *report_user, *report_password, *report_host;
 char *opt_relay_logname = 0, *opt_relaylog_index_name=0;
 char *opt_logname, *opt_slow_logname, *opt_bin_logname;
+char *opt_binlog_index_name=0;
 
 /* Static variables */
 
@@ -808,7 +806,6 @@ my_bool opt_expect_abort= 0, opt_bootstrap= 0;
 static my_bool opt_myisam_log;
 static int cleanup_done;
 static ulong opt_specialflag;
-static char *opt_binlog_index_name;
 char *mysql_home_ptr, *pidfile_name_ptr;
 /** Initial command line arguments (count), after load_defaults().*/
 static int defaults_argc;
@@ -941,6 +938,7 @@ PSI_mutex_key key_LOCK_relaylog_end_pos;
 PSI_mutex_key key_LOCK_thread_id;
 PSI_mutex_key key_LOCK_slave_state, key_LOCK_binlog_state,
   key_LOCK_rpl_thread, key_LOCK_rpl_thread_pool, key_LOCK_parallel_entry;
+PSI_mutex_key key_LOCK_rpl_semi_sync_master_enabled;
 PSI_mutex_key key_LOCK_binlog;
 
 PSI_mutex_key key_LOCK_stats,
@@ -1038,6 +1036,7 @@ static PSI_mutex_info all_server_mutexes[]=
   { &key_LOCK_rpl_thread_pool, "LOCK_rpl_thread_pool", 0},
   { &key_LOCK_parallel_entry, "LOCK_parallel_entry", 0},
   { &key_LOCK_ack_receiver, "Ack_receiver::mutex", 0},
+  { &key_LOCK_rpl_semi_sync_master_enabled, "LOCK_rpl_semi_sync_master_enabled", 0},
   { &key_LOCK_binlog, "LOCK_binlog", 0}
 };
 
@@ -1807,7 +1806,14 @@ static void close_connections(void)
                           (ulong) tmp->thread_id,
                           (tmp->main_security_ctx.user ?
                            tmp->main_security_ctx.user : ""));
-      close_connection(tmp,ER_SERVER_SHUTDOWN);
+      /*
+        close_connection() might need a valid current_thd
+        for memory allocation tracking.
+      */
+      THD* save_thd= current_thd;
+      set_current_thd(tmp);
+      close_connection(tmp);
+      set_current_thd(save_thd);
     }
 #endif
 
@@ -2992,10 +2998,6 @@ static bool cache_thread(THD *thd)
       _db_pop_();
 #endif
 
-    /* Clear warnings. */
-    if (!thd->get_stmt_da()->is_warning_info_empty())
-      thd->get_stmt_da()->clear_warning_info(thd->query_id);
-
     set_timespec(abstime, THREAD_CACHE_TIMEOUT);
     while (!abort_loop && ! wake_thread && ! kill_cached_threads)
     {
@@ -3040,9 +3042,8 @@ static bool cache_thread(THD *thd)
         Create new instrumentation for the new THD job,
         and attach it to this running pthread.
       */
-      PSI_thread *psi= PSI_CALL_new_thread(key_thread_one_connection,
-                                                   thd, thd->thread_id);
-      PSI_CALL_set_thread(psi);
+      PSI_CALL_set_thread(PSI_CALL_new_thread(key_thread_one_connection,
+                                              thd, thd->thread_id));
 
       /* reset abort flag for the thread */
       thd->mysys_var->abort= 0;
@@ -4075,14 +4076,16 @@ static void my_malloc_size_cb_func(long long size, my_bool is_thread_specific)
 {
   THD *thd= current_thd;
 
-  if (is_thread_specific)  /* If thread specific memory */
-  {
-    /*
-      When thread specfic is set, both mysqld_server_initialized and thd
-      must be set
-    */
-    DBUG_ASSERT(mysqld_server_initialized && thd);
+  /*
+    When thread specific is set, both mysqld_server_initialized and thd
+    must be set, and we check that with DBUG_ASSERT.
 
+    However, do not crash, if current_thd is NULL, in release version.
+  */
+  DBUG_ASSERT(!is_thread_specific || (mysqld_server_initialized && thd));
+
+  if (is_thread_specific && likely(thd))  /* If thread specific memory */
+  {
     DBUG_PRINT("info", ("thd memory_used: %lld  size: %lld",
                         (longlong) thd->status_var.local_memory_used,
                         size));
@@ -4170,6 +4173,39 @@ static int init_early_variables()
   return 0;
 }
 
+#ifdef _WIN32
+static void get_win_tzname(char* buf, size_t size)
+{
+  static struct
+  {
+    const wchar_t* windows_name;
+    const char*  tzdb_name;
+  }
+  tz_data[] =
+  {
+#include "win_tzname_data.h"
+    {0,0}
+  };
+  DYNAMIC_TIME_ZONE_INFORMATION  tzinfo;
+  if (GetDynamicTimeZoneInformation(&tzinfo) == TIME_ZONE_ID_UNKNOWN)
+  {
+    strncpy(buf, "unknown", size);
+    return;
+  }
+
+  for (size_t i= 0; tz_data[i].windows_name; i++)
+  {
+    if (wcscmp(tzinfo.TimeZoneKeyName, tz_data[i].windows_name) == 0)
+    {
+      strncpy(buf, tz_data[i].tzdb_name, size);
+      return;
+    }
+  }
+  wcstombs(buf, tzinfo.TimeZoneKeyName, size);
+  buf[size-1]= 0;
+  return;
+}
+#endif
 
 static int init_common_variables()
 {
@@ -4225,22 +4261,13 @@ static int init_common_variables()
   if (ignore_db_dirs_init())
     exit(1);
 
-#ifdef HAVE_TZNAME
+#ifdef _WIN32
+  get_win_tzname(system_time_zone, sizeof(system_time_zone));
+#elif defined(HAVE_TZNAME)
   struct tm tm_tmp;
   localtime_r(&server_start_time,&tm_tmp);
   const char *tz_name=  tzname[tm_tmp.tm_isdst != 0 ? 1 : 0];
-#ifdef _WIN32
-  /*
-    Time zone name may be localized and contain non-ASCII characters,
-    Convert from ANSI encoding to UTF8.
-  */
-  wchar_t wtz_name[sizeof(system_time_zone)];
-  mbstowcs(wtz_name, tz_name, sizeof(system_time_zone)-1);
-  WideCharToMultiByte(CP_UTF8,0, wtz_name, -1, system_time_zone, 
-    sizeof(system_time_zone) - 1, NULL, NULL);
-#else
   strmake_buf(system_time_zone, tz_name);
-#endif /* _WIN32 */
 #endif /* HAVE_TZNAME */
 
   /*
@@ -4364,6 +4391,8 @@ static int init_common_variables()
   if (IS_SYSVAR_AUTOSIZE(&server_version_ptr))
     set_server_version(server_version, sizeof(server_version));
 
+  mysql_real_data_home_len= uint(strlen(mysql_real_data_home));
+
   if (!opt_abort)
   {
     if (IS_SYSVAR_AUTOSIZE(&server_version_ptr))
@@ -4474,6 +4503,11 @@ static int init_common_variables()
     /* MyISAM requires two file handles per table. */
     wanted_files= (extra_files + max_connections + extra_max_connections +
                    tc_size * 2);
+#if defined(HAVE_POOL_OF_THREADS) && !defined(__WIN__)
+    // add epoll or kevent fd for each threadpool group, in case pool of threads is used
+    wanted_files+= (thread_handling > SCHEDULER_NO_THREADS) ? 0 : threadpool_size;
+#endif
+
     min_tc_size= MY_MIN(tc_size, TABLE_OPEN_CACHE_MIN);
     org_max_connections= max_connections;
     org_tc_size= tc_size;
@@ -4751,6 +4785,20 @@ static int init_common_variables()
   }
 
   global_system_variables.in_subquery_conversion_threshold= IN_SUBQUERY_CONVERSION_THRESHOLD;
+
+#ifdef WITH_WSREP
+  /*
+    We need to initialize auxiliary variables, that will be
+    further keep the original values of auto-increment options
+    as they set by the user. These variables used to restore
+    user-defined values of the auto-increment options after
+    setting of the wsrep_auto_increment_control to 'OFF'.
+  */
+  global_system_variables.saved_auto_increment_increment=
+    global_system_variables.auto_increment_increment;
+  global_system_variables.saved_auto_increment_offset=
+    global_system_variables.auto_increment_offset;
+#endif /* WITH_WSREP */
 
   return 0;
 }
@@ -5065,6 +5113,7 @@ static int init_server_components()
     We need to call each of these following functions to ensure that
     all things are initialized so that unireg_abort() doesn't fail
   */
+  my_cpu_init();
   mdl_init();
   if (tdc_init() || hostname_cache_init())
     unireg_abort(1);
@@ -5395,14 +5444,8 @@ static int init_server_components()
 #endif
 
 #ifndef EMBEDDED_LIBRARY
-  {
-    if (Session_tracker::server_boot_verify(system_charset_info))
-    {
-      sql_print_error("The variable session_track_system_variables has "
-		      "invalid values.");
-      unireg_abort(1);
-    }
-  }
+  if (session_tracker_init())
+    return 1;
 #endif //EMBEDDED_LIBRARY
 
   /* we do want to exit if there are any other unknown options */
@@ -5522,7 +5565,8 @@ static int init_server_components()
     initialized. This initialization was not possible before, as plugins
     (and thus some global system variables) are initialized after wsrep
     startup threads are created.
-    Note: This only needs to be done for rsync, xtrabackup based SST methods.
+    Note: This only needs to be done for rsync and mariabackup based SST
+    methods.
   */
   if (wsrep_before_SE())
     wsrep_plugins_post_init();
@@ -6092,6 +6136,8 @@ int mysqld_main(int argc, char **argv)
         wsrep_init_startup (false);
       }
 
+      WSREP_DEBUG("Startup creating %ld applier threads running %lu",
+	      wsrep_slave_threads - 1, wsrep_running_applier_threads);
       wsrep_create_appliers(wsrep_slave_threads - 1);
     }
   }
@@ -7788,7 +7834,6 @@ struct my_option my_long_options[]=
   MYSQL_TO_BE_IMPLEMENTED_OPTION("optimizer-trace-offset"),       // OPTIMIZER_TRACE
   MYSQL_TO_BE_IMPLEMENTED_OPTION("optimizer-trace-limit"),        // OPTIMIZER_TRACE
   MYSQL_TO_BE_IMPLEMENTED_OPTION("optimizer-trace-max-mem-size"), // OPTIMIZER_TRACE
-  MYSQL_TO_BE_IMPLEMENTED_OPTION("eq-range-index-dive-limit"),
   MYSQL_COMPATIBILITY_OPTION("server-id-bits"),
   MYSQL_TO_BE_IMPLEMENTED_OPTION("slave-rows-search-algorithms"), // HAVE_REPLICATION
   MYSQL_TO_BE_IMPLEMENTED_OPTION("slave-allow-batching"),         // HAVE_REPLICATION
@@ -8608,7 +8653,7 @@ SHOW_VAR status_vars[]= {
   {"Memory_used",              (char*) &show_memory_used, SHOW_SIMPLE_FUNC},
   {"Memory_used_initial",      (char*) &start_memory_used, SHOW_LONGLONG},
   {"Not_flushed_delayed_rows", (char*) &delayed_rows_in_use,    SHOW_LONG_NOFLUSH},
-  {"Open_files",               (char*) &my_file_opened,         SHOW_LONG_NOFLUSH},
+  {"Open_files",               (char*) &my_file_opened,         SHOW_SINT},
   {"Open_streams",             (char*) &my_stream_opened,       SHOW_LONG_NOFLUSH},
   {"Open_table_definitions",   (char*) &show_table_definitions, SHOW_SIMPLE_FUNC},
   {"Open_tables",              (char*) &show_open_tables,       SHOW_SIMPLE_FUNC},
@@ -9280,7 +9325,8 @@ mysqld_get_one_option(int optid, const struct my_option *opt, char *argument)
     val= p--;
     while (my_isspace(mysqld_charset, *p) && p > argument)
       *p-- = 0;
-    if (p == argument)
+    /* Db name can be one char also */
+    if (p == argument && my_isspace(mysqld_charset, *p))
     {
       sql_print_error("Bad syntax in replicate-rewrite-db - empty FROM db!\n");
       return 1;
@@ -9368,8 +9414,10 @@ mysqld_get_one_option(int optid, const struct my_option *opt, char *argument)
     opt_specialflag|= SPECIAL_NO_HOST_CACHE;
     break;
   case (int) OPT_SKIP_RESOLVE:
-    opt_skip_name_resolve= 1;
-    opt_specialflag|=SPECIAL_NO_RESOLVE;
+    if ((opt_skip_name_resolve= (argument != disabled_my_option)))
+      opt_specialflag|= SPECIAL_NO_RESOLVE;
+    else
+      opt_specialflag&= ~SPECIAL_NO_RESOLVE;
     break;
   case (int) OPT_WANT_CORE:
     test_flags |= TEST_CORE_ON_SIGNAL;
@@ -9428,6 +9476,8 @@ mysqld_get_one_option(int optid, const struct my_option *opt, char *argument)
     break;
   case OPT_PLUGIN_LOAD:
     free_list(opt_plugin_load_list_ptr);
+    if (argument == disabled_my_option)
+      break;                                    // Resets plugin list
     /* fall through */
   case OPT_PLUGIN_LOAD_ADD:
     opt_plugin_load_list_ptr->push_back(new i_string(argument));
@@ -9742,7 +9792,7 @@ static int get_options(int *argc_ptr, char ***argv_ptr)
     global_system_variables.binlog_format= BINLOG_FORMAT_ROW;
   }
 
-  if (!opt_bootstrap && WSREP_PROVIDER_EXISTS &&
+  if (!opt_bootstrap && WSREP_PROVIDER_EXISTS && WSREP_ON &&
       global_system_variables.binlog_format != BINLOG_FORMAT_ROW)
   {
 

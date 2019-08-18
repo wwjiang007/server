@@ -12,7 +12,7 @@
 --
 -- You should have received a copy of the GNU General Public License
 -- along with this program; if not, write to the Free Software
--- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+-- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 
 # This part converts any old privilege tables to privilege tables suitable
 # for current version of MySQL
@@ -464,14 +464,11 @@ ALTER TABLE proc MODIFY name char(64) DEFAULT '' NOT NULL,
                  DEFAULT CHARACTER SET utf8;
 
 # Correct the character set and collation
-ALTER TABLE proc CONVERT TO CHARACTER SET utf8;
 # Reset some fields after the conversion
-ALTER TABLE proc  MODIFY db
-                         char(64) collate utf8_bin DEFAULT '' NOT NULL,
-                  MODIFY definer
-                         char(141) collate utf8_bin DEFAULT '' NOT NULL,
-                  MODIFY comment
-                         text collate utf8_bin NOT NULL;
+ALTER TABLE proc CONVERT TO CHARACTER SET utf8,
+                  MODIFY db char(64) binary DEFAULT '' NOT NULL,
+                  MODIFY definer char(141) binary DEFAULT '' NOT NULL,
+                  MODIFY comment text binary NOT NULL;
 
 ALTER TABLE proc ADD character_set_client
                      char(32) collate utf8_bin DEFAULT NULL

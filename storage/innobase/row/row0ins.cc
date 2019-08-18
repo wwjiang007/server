@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2018, MariaDB Corporation.
+Copyright (c) 2016, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -24,11 +24,8 @@ Insert into a table
 Created 4/20/1996 Heikki Tuuri
 *******************************************************/
 
-#include "ha_prototypes.h"
-
 #include "row0ins.h"
 #include "dict0dict.h"
-#include "dict0boot.h"
 #include "trx0rec.h"
 #include "trx0undo.h"
 #include "btr0btr.h"
@@ -38,7 +35,6 @@ Created 4/20/1996 Heikki Tuuri
 #include "que0que.h"
 #include "row0upd.h"
 #include "row0sel.h"
-#include "row0row.h"
 #include "row0log.h"
 #include "rem0cmp.h"
 #include "lock0lock.h"
@@ -48,8 +44,12 @@ Created 4/20/1996 Heikki Tuuri
 #include "buf0lru.h"
 #include "fts0fts.h"
 #include "fts0types.h"
-#include "m_string.h"
-#include "gis0geo.h"
+
+#ifdef WITH_WSREP
+#include <mysql/service_wsrep.h>
+#include "../../../wsrep/wsrep_api.h"
+#include "wsrep_mysqld_c.h"
+#endif /* WITH_WSREP */
 
 /*************************************************************************
 IMPORTANT NOTE: Any operation that generates redo MUST check that there
@@ -74,7 +74,11 @@ ins_node_create(
 	ins_node_t*	node;
 
 	node = static_cast<ins_node_t*>(
-		mem_heap_alloc(heap, sizeof(ins_node_t)));
+		mem_heap_zalloc(heap, sizeof(ins_node_t)));
+
+	if (!node) {
+		return(NULL);
+	}
 
 	node->common.type = QUE_NODE_INSERT;
 
@@ -82,13 +86,6 @@ ins_node_create(
 
 	node->state = INS_NODE_SET_IX_LOCK;
 	node->table = table;
-	node->index = NULL;
-	node->entry = NULL;
-
-	node->select = NULL;
-
-	node->trx_id = 0;
-	node->duplicate = NULL;
 
 	node->entry_sys_heap = mem_heap_create(128);
 
@@ -193,7 +190,6 @@ ins_node_set_new_row(
 	node->state = INS_NODE_SET_IX_LOCK;
 	node->index = NULL;
 	node->entry = NULL;
-	node->duplicate = NULL;
 
 	node->row = row;
 
@@ -334,7 +330,7 @@ row_ins_clust_index_entry_by_modify(
 {
 	const rec_t*	rec;
 	upd_t*		update;
-	dberr_t		err;
+	dberr_t		err = DB_SUCCESS;
 	btr_cur_t*	cursor	= btr_pcur_get_btr_cur(pcur);
 	TABLE*		mysql_table = NULL;
 	ut_ad(dict_index_is_clust(cursor->index));
@@ -357,7 +353,11 @@ row_ins_clust_index_entry_by_modify(
 
 	update = row_upd_build_difference_binary(
 		cursor->index, entry, rec, NULL, true,
-		thr_get_trx(thr), heap, mysql_table);
+		thr_get_trx(thr), heap, mysql_table, &err);
+	if (err != DB_SUCCESS) {
+		return(err);
+	}
+
 	if (mode != BTR_MODIFY_TREE) {
 		ut_ad((mode & ulint(~BTR_ALREADY_S_LATCHED))
 		      == BTR_MODIFY_LEAF);
@@ -490,8 +490,6 @@ row_ins_cascade_calc_update_vec(
 	doc_id_t	new_doc_id = FTS_NULL_DOC_ID;
 	ulint		prefix_col;
 
-	ut_a(node);
-	ut_a(foreign);
 	ut_a(cascade);
 	ut_a(table);
 	ut_a(index);
@@ -953,7 +951,7 @@ row_ins_foreign_fill_virtual(
 	upd_field_t*	upd_field;
 	dict_vcol_set*	v_cols = foreign->v_cols;
 	update->old_vrow = row_build(
-		ROW_COPY_POINTERS, index, rec,
+		ROW_COPY_DATA, index, rec,
 		offsets, index->table, NULL, NULL,
 		&ext, cascade->heap);
 	n_diff = update->n_fields;
@@ -968,11 +966,11 @@ row_ins_foreign_fill_virtual(
 
 	if (innobase_allocate_row_for_vcol(thd, index, &v_heap,
                                            &mysql_table,
-                                           &record, &vcol_storage))
-        {
+                                           &record, &vcol_storage)) {
+		if (v_heap) mem_heap_free(v_heap);
 		*err = DB_OUT_OF_MEMORY;
-                goto func_exit;
-        }
+		goto func_exit;
+	}
 
 	for (ulint i = 0; i < n_v_fld; i++) {
 
@@ -1045,11 +1043,11 @@ func_exit:
 
 #ifdef WITH_WSREP
 dberr_t wsrep_append_foreign_key(trx_t *trx,
-			       dict_foreign_t*	foreign,
-			       const rec_t*	clust_rec,
-			       dict_index_t*	clust_index,
-			       ibool		referenced,
-			       ibool            shared);
+				dict_foreign_t*	foreign,
+				const rec_t*	clust_rec,
+				dict_index_t*	clust_index,
+				ibool		referenced,
+				enum wsrep_key_type key_type);
 #endif /* WITH_WSREP */
 
 /*********************************************************************//**
@@ -1088,10 +1086,6 @@ row_ins_foreign_check_on_constraint(
 	doc_id_t	doc_id = FTS_NULL_DOC_ID;
 
 	DBUG_ENTER("row_ins_foreign_check_on_constraint");
-	ut_a(thr);
-	ut_a(foreign);
-	ut_a(pcur);
-	ut_a(mtr);
 
 	trx = thr_get_trx(thr);
 
@@ -1409,9 +1403,9 @@ row_ins_foreign_check_on_constraint(
 	if (table->versioned() && cascade->is_delete != PLAIN_DELETE
 	    && cascade->update->affects_versioned()) {
 		ut_ad(!cascade->historical_heap);
-		cascade->historical_heap = mem_heap_create(128);
+		cascade->historical_heap = mem_heap_create(srv_page_size);
 		cascade->historical_row = row_build(
-			ROW_COPY_POINTERS, clust_index, clust_rec, NULL, table,
+			ROW_COPY_DATA, clust_index, clust_rec, NULL, table,
 			NULL, NULL, NULL, cascade->historical_heap);
 	}
 
@@ -1433,8 +1427,8 @@ row_ins_foreign_check_on_constraint(
 	cascade->state = UPD_NODE_UPDATE_CLUSTERED;
 
 #ifdef WITH_WSREP
-	err = wsrep_append_foreign_key(trx, foreign, clust_rec, clust_index,
-				       FALSE, FALSE);
+	err = wsrep_append_foreign_key(trx, foreign, cascade->pcur->old_rec, clust_index,
+				       FALSE, WSREP_KEY_EXCLUSIVE);
 	if (err != DB_SUCCESS) {
 		fprintf(stderr,
 			"WSREP: foreign key append failed: %d\n", err);
@@ -1587,7 +1581,7 @@ row_ins_check_foreign_constraint(
 	upd_node= NULL;
 #endif /* WITH_WSREP */
 
-	ut_ad(rw_lock_own(dict_operation_lock, RW_LOCK_S));
+	ut_ad(rw_lock_own(&dict_operation_lock, RW_LOCK_S));
 
 	err = DB_SUCCESS;
 
@@ -1809,13 +1803,36 @@ row_ins_check_foreign_constraint(
 				if (check_ref) {
 					err = DB_SUCCESS;
 #ifdef WITH_WSREP
+					if (!wsrep_on(trx->mysql_thd)) {
+						goto end_scan;
+					}
+					enum wsrep_key_type key_type;
+					if (upd_node != NULL) {
+						key_type = WSREP_KEY_SHARED;
+					} else {
+						switch (wsrep_certification_rules) {
+						default:
+						case WSREP_CERTIFICATION_RULES_STRICT:
+							key_type = WSREP_KEY_EXCLUSIVE;
+							break;
+						case WSREP_CERTIFICATION_RULES_OPTIMIZED:
+							key_type = WSREP_KEY_SEMI;
+							break;
+						}
+					}
+
 					err = wsrep_append_foreign_key(
-						thr_get_trx(thr),
+						trx,
 						foreign,
 						rec,
 						check_index,
 						check_ref,
-						(upd_node) ? TRUE : FALSE);
+						key_type);
+
+					if (err != DB_SUCCESS) {
+						fprintf(stderr,
+							"WSREP: foreign key append failed: %d\n", err);
+					}
 #endif /* WITH_WSREP */
 					goto end_scan;
 				} else if (foreign->type != 0) {
@@ -1916,9 +1933,12 @@ do_possible_lock_wait:
 
 		thr->lock_state = QUE_THR_LOCK_NOLOCK;
 
-		if (check_table->to_be_dropped
-		    || trx->error_state == DB_LOCK_WAIT_TIMEOUT) {
+		err = trx->error_state;
+		if (err != DB_SUCCESS) {
+		} else if (check_table->to_be_dropped) {
 			err = DB_LOCK_WAIT_TIMEOUT;
+		} else {
+			err = DB_LOCK_WAIT;
 		}
 
 		check_table->dec_fk_checks();
@@ -2338,12 +2358,6 @@ row_ins_duplicate_error_in_clust(
 						  true,
 						  ULINT_UNDEFINED, &heap);
 
-			ulint lock_type;
-
-			lock_type =
-				trx->isolation_level <= TRX_ISO_READ_COMMITTED
-				? LOCK_REC_NOT_GAP : LOCK_ORDINARY;
-
 			/* We set a lock on the possible duplicate: this
 			is needed in logical logging of MySQL to make
 			sure that in roll-forward we get the same duplicate
@@ -2360,13 +2374,13 @@ row_ins_duplicate_error_in_clust(
 				INSERT ON DUPLICATE KEY UPDATE). */
 
 				err = row_ins_set_exclusive_rec_lock(
-					lock_type,
+					LOCK_REC_NOT_GAP,
 					btr_cur_get_block(cursor),
 					rec, cursor->index, offsets, thr);
 			} else {
 
 				err = row_ins_set_shared_rec_lock(
-					lock_type,
+					LOCK_REC_NOT_GAP,
 					btr_cur_get_block(cursor), rec,
 					cursor->index, offsets, thr);
 			}
@@ -2490,10 +2504,8 @@ row_ins_index_entry_big_rec(
 	const big_rec_t*	big_rec,
 	ulint*			offsets,
 	mem_heap_t**		heap,
-#ifndef DBUG_OFF
-	const void*		thd,
-#endif /* DBUG_OFF */
-	dict_index_t*		index)
+	dict_index_t*		index,
+	const void*		thd __attribute__((unused)))
 {
 	mtr_t		mtr;
 	btr_pcur_t	pcur;
@@ -2533,14 +2545,6 @@ row_ins_index_entry_big_rec(
 
 	return(error);
 }
-
-#ifdef DBUG_OFF
-# define row_ins_index_entry_big_rec(e,big,ofs,heap,index,thd) \
-	row_ins_index_entry_big_rec(e,big,ofs,heap,index)
-#else /* DBUG_OFF */
-# define row_ins_index_entry_big_rec(e,big,ofs,heap,index,thd) \
-	row_ins_index_entry_big_rec(e,big,ofs,heap,thd,index)
-#endif /* DBUG_OFF */
 
 /***************************************************************//**
 Tries to insert an entry into a clustered index, ignoring foreign key
@@ -2681,8 +2685,6 @@ row_ins_clust_index_entry_low(
 		}
 	}
 
-	if (index->is_instant()) entry->trim(*index);
-
 	if (rec_is_metadata(btr_cur_get_rec(cursor), index)) {
 		goto do_insert;
 	}
@@ -2749,6 +2751,7 @@ err_exit:
 		mtr_commit(&mtr);
 		mem_heap_free(entry_heap);
 	} else {
+		if (index->is_instant()) entry->trim(*index);
 do_insert:
 		rec_t*	insert_rec;
 
@@ -2793,8 +2796,7 @@ do_insert:
 
 			DBUG_EXECUTE_IF(
 				"row_ins_extern_checkpoint",
-				log_make_checkpoint_at(
-					LSN_MAX, TRUE););
+				log_write_up_to(mtr.commit_lsn(), true););
 			err = row_ins_index_entry_big_rec(
 				entry, big_rec, offsets, &offsets_heap, index,
 				thr_get_trx(thr)->mysql_thd);
@@ -3003,7 +3005,7 @@ row_ins_sec_index_entry_low(
 				"Table %s is encrypted but encryption service or"
 				" used key_id is not available. "
 				" Can't continue reading table.",
-				index->table->name);
+				index->table->name.m_name);
 			index->table->file_unreadable = true;
 		}
 		goto func_exit;
@@ -3089,44 +3091,6 @@ row_ins_sec_index_entry_low(
 			 & ~(BTR_INSERT | BTR_IGNORE_SEC_UNIQUE)),
 			&cursor, 0, __FILE__, __LINE__, &mtr);
 	}
-
-	if (!(flags & BTR_NO_LOCKING_FLAG)
-	    && dict_index_is_unique(index)
-	    && thr_get_trx(thr)->duplicates
-	    && thr_get_trx(thr)->isolation_level >= TRX_ISO_REPEATABLE_READ) {
-
-		/* When using the REPLACE statement or ON DUPLICATE clause, a
-		gap lock is taken on the position of the to-be-inserted record,
-		to avoid other concurrent transactions from inserting the same
-		record. */
-
-		dberr_t	err;
-		const rec_t* rec = page_rec_get_next_const(
-			btr_cur_get_rec(&cursor));
-
-		ut_ad(!page_rec_is_infimum(rec));
-
-		offsets = rec_get_offsets(rec, index, offsets, true,
-					  ULINT_UNDEFINED, &offsets_heap);
-
-		err = row_ins_set_exclusive_rec_lock(
-			LOCK_GAP, btr_cur_get_block(&cursor), rec,
-			index, offsets, thr);
-
-		switch (err) {
-		case DB_SUCCESS:
-		case DB_SUCCESS_LOCKED_REC:
-			if (thr_get_trx(thr)->error_state != DB_DUPLICATE_KEY) {
-				break;
-			}
-			/* Fall through (skip actual insert) after we have
-			successfully acquired the gap lock. */
-		default:
-			goto func_exit;
-		}
-	}
-
-	ut_ad(thr_get_trx(thr)->error_state == DB_SUCCESS);
 
 	if (dup_chk_only) {
 		goto func_exit;
@@ -3404,14 +3368,14 @@ row_ins_spatial_index_entry_set_mbr_field(
 	dfield_t*	field,		/*!< in/out: mbr field */
 	const dfield_t*	row_field)	/*!< in: row field */
 {
-	uchar*		dptr = NULL;
 	ulint		dlen = 0;
 	double		mbr[SPDIMS * 2];
 
 	/* This must be a GEOMETRY datatype */
 	ut_ad(DATA_GEOMETRY_MTYPE(field->type.mtype));
 
-	dptr = static_cast<uchar*>(dfield_get_data(row_field));
+	const byte* dptr = static_cast<const byte*>(
+		dfield_get_data(row_field));
 	dlen = dfield_get_len(row_field);
 
 	/* obtain the MBR */
@@ -3428,8 +3392,8 @@ columns in row.
 @param[in]	index	index handler
 @param[out]	entry	index entry to make
 @param[in]	row	row
-
 @return DB_SUCCESS if the set is successful */
+static
 dberr_t
 row_ins_index_entry_set_vals(
 	const dict_index_t*	index,
@@ -3646,15 +3610,9 @@ row_ins(
 	ins_node_t*	node,	/*!< in: row insert node */
 	que_thr_t*	thr)	/*!< in: query thread */
 {
-	dberr_t	err;
-
 	DBUG_ENTER("row_ins");
 
 	DBUG_PRINT("row_ins", ("table: %s", node->table->name.m_name));
-
-	if (node->duplicate) {
-		thr_get_trx(thr)->error_state = DB_DUPLICATE_KEY;
-	}
 
 	if (node->state == INS_NODE_ALLOC_ROW_ID) {
 
@@ -3679,105 +3637,11 @@ row_ins(
 
 	while (node->index != NULL) {
 		if (node->index->type != DICT_FTS) {
-			err = row_ins_index_entry_step(node, thr);
+			dberr_t err = row_ins_index_entry_step(node, thr);
 
-			switch (err) {
-			case DB_SUCCESS:
-				break;
-			case DB_NO_REFERENCED_ROW:
-				if (!dict_index_is_unique(node->index)) {
-					DBUG_RETURN(err);
-				}
-				/* fall through */
-			case DB_DUPLICATE_KEY:
-				ut_ad(dict_index_is_unique(node->index));
-
-				if (thr_get_trx(thr)->isolation_level
-				    >= TRX_ISO_REPEATABLE_READ
-				    && thr_get_trx(thr)->duplicates) {
-
-					/* When we are in REPLACE statement or
-					INSERT ..  ON DUPLICATE UPDATE
-					statement, we process all the
-					unique secondary indexes, even after we
-					encounter a duplicate error. This is
-					done to take necessary gap locks in
-					secondary indexes to block concurrent
-					transactions from inserting the
-					searched records. */
-					if (err == DB_NO_REFERENCED_ROW
-					    && node->duplicate) {
-						/* A foreign key check on a
-						unique index may fail to
-						find the record.
-
-						Consider as a example
-						following:
-						create table child(a int not null
-						primary key, b int not null,
-						c int,
-						unique key (b),
-						foreign key (b) references
-						parent (id)) engine=innodb;
-
-						insert into child values
-						(1,1,2);
-
-						insert into child(a) values
-						(1) on duplicate key update
-						c = 3;
-
-						Now primary key value 1
-						naturally causes duplicate
-						key error that will be
-						stored on node->duplicate.
-						If there was no duplicate
-						key error, we should return
-						the actual no referenced
-						row error.
-
-						As value for
-						column b used in both unique
-						key and foreign key is not
-						provided, server uses 0 as a
-						search value. This is
-						naturally, not found leading
-						to DB_NO_REFERENCED_ROW.
-						But, we should update the
-						row with primay key value 1
-						anyway.
-
-						Return the
-						original  DB_DUPLICATE_KEY
-						error after
-						placing all gaplocks. */
-						err = DB_DUPLICATE_KEY;
-						break;
-					} else if (!node->duplicate) {
-						/* Save 1st dup error. Ignore
-						subsequent dup errors. */
-						node->duplicate = node->index;
-						thr_get_trx(thr)->error_state
-							= DB_DUPLICATE_KEY;
-					}
-					break;
-				}
-				// fall through
-			default:
+			if (err != DB_SUCCESS) {
 				DBUG_RETURN(err);
 			}
-		}
-
-		if (node->duplicate && node->table->is_temporary()) {
-			ut_ad(thr_get_trx(thr)->error_state
-			      == DB_DUPLICATE_KEY);
-			/* For TEMPORARY TABLE, we won't lock anything,
-			so we can simply break here instead of requiring
-			GAP locks for other unique secondary indexes,
-			pretending we have consumed all indexes. */
-			node->index = NULL;
-			node->entry = NULL;
-			break;
 		}
 
 		node->index = dict_table_get_next_index(node->index);
@@ -3792,30 +3656,13 @@ row_ins(
 			node->index = dict_table_get_next_index(node->index);
 			node->entry = UT_LIST_GET_NEXT(tuple_list, node->entry);
 		}
-
-		/* After encountering a duplicate key error, we process
-		remaining indexes just to place gap locks and no actual
-		insertion will take place.  These gap locks are needed
-		only for unique indexes.  So skipping non-unique indexes. */
-		if (node->duplicate) {
-			while (node->index
-			       && !dict_index_is_unique(node->index)) {
-
-				node->index = dict_table_get_next_index(
-					node->index);
-				node->entry = UT_LIST_GET_NEXT(tuple_list,
-							       node->entry);
-			}
-			thr_get_trx(thr)->error_state = DB_DUPLICATE_KEY;
-		}
 	}
 
 	ut_ad(node->entry == NULL);
 
-	thr_get_trx(thr)->error_info = node->duplicate;
 	node->state = INS_NODE_ALLOC_ROW_ID;
 
-	DBUG_RETURN(node->duplicate ? DB_DUPLICATE_KEY : DB_SUCCESS);
+	DBUG_RETURN(DB_SUCCESS);
 }
 
 /***********************************************************//**

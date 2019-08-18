@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -28,7 +28,6 @@ Created 5/30/1994 Heikki Tuuri
 #define rem0rec_h
 
 #ifndef UNIV_INNOCHECKSUM
-#include "univ.i"
 #include "data0data.h"
 #include "rem0types.h"
 #include "mtr0types.h"
@@ -640,17 +639,6 @@ rec_offs_any_null_extern(
 /*=====================*/
 	const rec_t*	rec,		/*!< in: record */
 	const ulint*	offsets)	/*!< in: rec_get_offsets(rec) */
-	MY_ATTRIBUTE((warn_unused_result));
-
-/******************************************************//**
-Returns nonzero if the extern bit is set in nth field of rec.
-@return nonzero if externally stored */
-UNIV_INLINE
-ulint
-rec_offs_nth_extern_old(
-/*================*/
-	const rec_t*	rec,	/*!< in: record */
-	ulint		    n	/*!< in: index of the field */)
 	MY_ATTRIBUTE((warn_unused_result));
 
 /** Mark the nth field as externally stored.

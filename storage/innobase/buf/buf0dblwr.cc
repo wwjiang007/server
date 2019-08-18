@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2017, MariaDB Corporation.
+Copyright (c) 2013, 2018, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -24,7 +24,6 @@ Doublwrite buffer module
 Created 2011/12/19
 *******************************************************/
 
-#include "ha_prototypes.h"
 #include "buf0dblwr.h"
 #include "buf0buf.h"
 #include "buf0checksum.h"
@@ -326,7 +325,7 @@ too_small:
 	mtr_commit(&mtr);
 
 	/* Flush the modified pages to disk and make a checkpoint */
-	log_make_checkpoint_at(LSN_MAX, TRUE);
+	log_make_checkpoint_at(LSN_MAX);
 
 	/* Remove doublewrite pages from LRU */
 	buf_pool_invalidate();
@@ -571,7 +570,7 @@ buf_dblwr_process()
 		}
 
 		const page_size_t	page_size(space->flags);
-		ut_ad(!buf_page_is_zeroes(page, page_size));
+		ut_ad(!buf_page_is_zeroes(page, page_size.physical()));
 
 		/* We want to ensure that for partial reads the
 		unread portion of the page is NUL. */
@@ -595,7 +594,9 @@ buf_dblwr_process()
 		}
 
 		const bool is_all_zero = buf_page_is_zeroes(
-			read_buf, page_size);
+			read_buf, page_size.physical());
+		const bool expect_encrypted = space->crypt_data
+			&& space->crypt_data->type != CRYPT_SCHEME_UNENCRYPTED;
 
 		if (is_all_zero) {
 			/* We will check if the copy in the
@@ -611,10 +612,13 @@ buf_dblwr_process()
 				goto bad;
 			}
 
-			if (fil_space_verify_crypt_checksum(
-				    read_buf, page_size, space_id, page_no)
-			    || !buf_page_is_corrupted(
-				    true, read_buf, page_size, space)) {
+			if (expect_encrypted && mach_read_from_4(
+				    read_buf
+				    + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION)
+			    ? fil_space_verify_crypt_checksum(read_buf,
+							      page_size)
+			    : !buf_page_is_corrupted(true, read_buf,
+						     page_size, space)) {
 				/* The page is good; there is no need
 				to consult the doublewrite buffer. */
 				continue;
@@ -631,16 +635,13 @@ bad:
 		ulint decomp = fil_page_decompress(buf, page);
 		if (!decomp || (decomp != srv_page_size
 				&& page_size.is_compressed())) {
-			goto bad_doublewrite;
+			continue;
 		}
-		if (!fil_space_verify_crypt_checksum(page, page_size,
-						     space_id, page_no)
-		    && buf_page_is_corrupted(true, page, page_size, space)) {
-			if (!is_all_zero) {
-bad_doublewrite:
-				ib::warn() << "A doublewrite copy of page "
-					<< page_id << " is corrupted.";
-			}
+
+		if (expect_encrypted && mach_read_from_4(
+			    page + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION)
+		    ? !fil_space_verify_crypt_checksum(page, page_size)
+		    : buf_page_is_corrupted(true, page, page_size, space)) {
 			/* Theoretically we could have another good
 			copy for this page in the doublewrite
 			buffer. If not, we will report a fatal error
@@ -856,7 +857,7 @@ buf_dblwr_check_block(
 		but just happens to have wrongly set FIL_PAGE_TYPE,
 		such pages should never be modified to without also
 		adjusting the page type during page allocation or
-		buf_flush_init_for_writing() or fil_page_reset_type(). */
+		buf_flush_init_for_writing() or fil_block_reset_type(). */
 		break;
 	case FIL_PAGE_TYPE_FSP_HDR:
 	case FIL_PAGE_IBUF_BITMAP:

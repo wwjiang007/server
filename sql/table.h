@@ -1,7 +1,7 @@
 #ifndef TABLE_INCLUDED
 #define TABLE_INCLUDED
 /* Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2018, MariaDB
+   Copyright (c) 2009, 2019, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -14,7 +14,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "sql_plist.h"
 #include "sql_list.h"                           /* Sql_alloc */
@@ -55,6 +55,7 @@ class Virtual_column_info;
 class Table_triggers_list;
 class TMP_TABLE_PARAM;
 class SEQUENCE;
+struct Name_resolution_context;
 
 /*
   Used to identify NESTED_JOIN structures within a join (applicable only to
@@ -638,16 +639,6 @@ struct TABLE_SHARE
   LEX_CSTRING normalized_path;		/* unpack_filename(path) */
   LEX_CSTRING connect_string;
 
-  const char* orig_table_name;          /* Original table name for this tmp table */
-  const char* error_table_name() const  /* Get table name for error messages */
-  {
-    return tmp_table ? (
-      orig_table_name ?
-        orig_table_name :
-        "(temporary)") :
-      table_name.str;
-  }
-
   /* 
      Set of keys in use, implemented as a Bitmap.
      Excludes keys disabled by ALTER TABLE ... DISABLE KEYS.
@@ -720,6 +711,9 @@ struct TABLE_SHARE
   uint column_bitmap_size;
   uchar frm_version;
 
+  enum enum_v_keys { NOT_INITIALIZED=0, NO_V_KEYS, V_KEYS };
+  enum_v_keys check_set_initialized;
+
   bool use_ext_keys;                    /* Extended keys can be used */
   bool null_field_first;
   bool system;                          /* Set if system table (one record) */
@@ -731,7 +725,6 @@ struct TABLE_SHARE
   bool table_creation_was_logged;
   bool non_determinstic_insert;
   bool vcols_need_refixing;
-  bool check_set_initialized;
   bool has_update_default_function;
   bool can_do_row_logging;              /* 1 if table supports RBR */
 
@@ -752,9 +745,6 @@ struct TABLE_SHARE
 
   /* For sequence tables, the current sequence state */
   SEQUENCE *sequence;
-
-  /* Name of the tablespace used for this table */
-  char *tablespace;
 
 #ifdef WITH_PARTITION_STORAGE_ENGINE
   /* filled in when reading from frm */
@@ -800,6 +790,8 @@ struct TABLE_SHARE
 
   /** Instrumentation for this table share. */
   PSI_table_share *m_psi;
+
+  inline void reset() { bzero((void*)this, sizeof(*this)); }
 
   /*
     Set share's table cache key and update its db and table name appropriately.
@@ -851,12 +843,6 @@ struct TABLE_SHARE
   {
     memcpy(key_buff, key, key_length);
     set_table_cache_key(key_buff, key_length);
-  }
-
-  inline bool honor_global_locks()
-  {
-    return ((table_category == TABLE_CATEGORY_USER)
-            || (table_category == TABLE_CATEGORY_SYSTEM));
   }
 
   inline bool require_write_privileges()
@@ -1359,6 +1345,8 @@ public:
   SplM_opt_info *spl_opt_info;
   key_map keys_usable_for_splitting;
 
+
+  inline void reset() { bzero((void*)this, sizeof(*this)); }
   void init(THD *thd, TABLE_LIST *tl);
   bool fill_item_list(List<Item> *item_list) const;
   void reset_item_list(List<Item> *item_list, uint skip) const;
@@ -1940,12 +1928,21 @@ struct TABLE_LIST
     Prepare TABLE_LIST that consists of one table instance to use in
     open_and_lock_tables
   */
+  inline void reset() { bzero((void*)this, sizeof(*this)); }
   inline void init_one_table(const LEX_CSTRING *db_arg,
                              const LEX_CSTRING *table_name_arg,
                              const LEX_CSTRING *alias_arg,
                              enum thr_lock_type lock_type_arg)
   {
-    bzero((char*) this, sizeof(*this));
+    enum enum_mdl_type mdl_type;
+    if (lock_type_arg >= TL_WRITE_ALLOW_WRITE)
+      mdl_type= MDL_SHARED_WRITE;
+    else if (lock_type_arg == TL_READ_NO_INSERT)
+      mdl_type= MDL_SHARED_NO_WRITE;
+    else
+      mdl_type= MDL_SHARED_READ;
+
+    reset();
     DBUG_ASSERT(!db_arg->str || strlen(db_arg->str) == db_arg->length);
     DBUG_ASSERT(!table_name_arg->str || strlen(table_name_arg->str) == table_name_arg->length);
     DBUG_ASSERT(!alias_arg || strlen(alias_arg->str) == alias_arg->length);
@@ -1953,9 +1950,8 @@ struct TABLE_LIST
     table_name= *table_name_arg;
     alias= (alias_arg ? *alias_arg : *table_name_arg);
     lock_type= lock_type_arg;
-    mdl_request.init(MDL_key::TABLE, db.str, table_name.str,
-                     (lock_type >= TL_WRITE_ALLOW_WRITE) ?
-                     MDL_SHARED_WRITE : MDL_SHARED_READ,
+    updating= lock_type >= TL_WRITE_ALLOW_WRITE;
+    mdl_request.init(MDL_key::TABLE, db.str, table_name.str, mdl_type,
                      MDL_TRANSACTION);
   }
 
@@ -1991,6 +1987,7 @@ struct TABLE_LIST
     *last_ptr= &next_global;
   }
 
+
   /*
     List of tables local to a subquery (used by SQL_I_List). Considers
     views as leaves (unlike 'next_leaf' below). Created at parse time
@@ -2005,6 +2002,7 @@ struct TABLE_LIST
   LEX_CSTRING   alias;
   const char    *option;                /* Used by cache index  */
   Item		*on_expr;		/* Used with outer join */
+  Name_resolution_context *on_context;  /* For ON expressions */
 
   Item          *sj_on_expr;
   /*
@@ -2073,7 +2071,7 @@ struct TABLE_LIST
   /* Index names in a "... JOIN ... USE/IGNORE INDEX ..." clause. */
   List<Index_hint> *index_hints;
   TABLE        *table;                          /* opened table */
-  uint          table_id; /* table id (from binlog) for opened table */
+  ulonglong         table_id; /* table id (from binlog) for opened table */
   /*
     select_result for derived table to pass it from table creation to table
     filling procedure
@@ -2462,8 +2460,7 @@ struct TABLE_LIST
 
     @sa check_and_update_table_version()
   */
-  inline
-  bool is_table_ref_id_equal(TABLE_SHARE *s) const
+  inline bool is_table_ref_id_equal(TABLE_SHARE *s) const
   {
     return (m_table_ref_type == s->get_table_ref_type() &&
             m_table_ref_version == s->get_table_ref_version());
@@ -2475,12 +2472,10 @@ struct TABLE_LIST
 
     @sa check_and_update_table_version()
   */
-  inline
-  void set_table_ref_id(TABLE_SHARE *s)
+  inline void set_table_ref_id(TABLE_SHARE *s)
   { set_table_ref_id(s->get_table_ref_type(), s->get_table_ref_version()); }
 
-  inline
-  void set_table_ref_id(enum_table_ref_type table_ref_type_arg,
+  inline void set_table_ref_id(enum_table_ref_type table_ref_type_arg,
                         ulong table_ref_version_arg)
   {
     m_table_ref_type= table_ref_type_arg;
@@ -2604,6 +2599,16 @@ struct TABLE_LIST
   void set_lock_type(THD* thd, enum thr_lock_type lock);
   void check_pushable_cond_for_table(Item *cond);
   Item *build_pushable_cond_for_table(THD *thd, Item *cond); 
+
+  void remove_join_columns()
+  {
+    if (join_columns)
+    {
+      join_columns->empty();
+      join_columns= NULL;
+      is_join_columns_complete= FALSE;
+    }
+  }
 
 private:
   bool prep_check_option(THD *thd, uint8 check_opt_type);
@@ -2743,9 +2748,31 @@ public:
 };
 
 
+#define JOIN_OP_NEST       1
+#define REBALANCED_NEST    2
+
 typedef struct st_nested_join
 {
   List<TABLE_LIST>  join_list;       /* list of elements in the nested join */
+  /*
+    Currently the valid values for nest type are:
+    JOIN_OP_NEST - for nest created for JOIN operation used as an operand in
+    a join expression, contains 2 elements;
+    JOIN_OP_NEST | REBALANCED_NEST -  nest created after tree re-balancing
+    in st_select_lex::add_cross_joined_table(), contains 1 element;
+    0 - for all other nests.
+    Examples:
+    1.  SELECT * FROM t1 JOIN t2 LEFT JOIN t3 ON t2.a=t3.a;
+    Here the nest created for LEFT JOIN at first has nest_type==JOIN_OP_NEST.
+    After re-balancing in st_select_lex::add_cross_joined_table() this nest
+    has nest_type==JOIN_OP_NEST | REBALANCED_NEST. The nest for JOIN created
+    in st_select_lex::add_cross_joined_table() has nest_type== JOIN_OP_NEST.
+    2.  SELECT * FROM t1 JOIN (t2 LEFT JOIN t3 ON t2.a=t3.a)
+    Here the nest created for LEFT JOIN has nest_type==0, because it's not
+    an operand in a join expression. The nest created for JOIN has nest_type
+    set to JOIN_OP_NEST.
+  */
+  uint nest_type;
   /* 
     Bitmap of tables within this nested join (including those embedded within
     its children), including tables removed by table elimination.

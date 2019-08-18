@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -745,33 +745,6 @@ int sp_cursor::open(THD *thd)
   if (mysql_open_cursor(thd, &result, &server_side_cursor))
     return -1;
   return 0;
-}
-
-
-/**
-  Open the cursor, but do not copy data.
-  This method is used to fetch the cursor structure
-  to cursor%ROWTYPE routine variables.
-  Data copying is suppressed by setting thd->lex->limit_rows_examined to 0.
-*/
-int sp_cursor::open_view_structure_only(THD *thd)
-{
-  int res;
-  int thd_no_errors_save= thd->no_errors;
-  Item *limit_rows_examined= thd->lex->limit_rows_examined; // No data copying
-  if (!(thd->lex->limit_rows_examined= new (thd->mem_root) Item_uint(thd, 0)))
-    return -1;
-  thd->no_errors= true; // Suppress ER_QUERY_EXCEEDED_ROWS_EXAMINED_LIMIT
-  DBUG_ASSERT(!thd->killed);
-  res= open(thd);
-  /*
-    The query possibly exited on LIMIT ROWS EXAMINED and set thd->killed.
-    Reset it now.
-  */
-  thd->reset_killed();
-  thd->no_errors= thd_no_errors_save;
-  thd->lex->limit_rows_examined= limit_rows_examined;
-  return res;
 }
 
 

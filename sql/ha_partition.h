@@ -16,7 +16,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "sql_partition.h"      /* part_id_range, partition_element */
 #include "queues.h"             /* QUEUE */
@@ -349,7 +349,6 @@ private:
   /*
     Variables for lock structures.
   */
-  THR_LOCK_DATA lock;                   /* MySQL lock */
 
   bool auto_increment_lock;             /**< lock reading/updating auto_inc */
   /**
@@ -412,6 +411,22 @@ public:
   }
 
   virtual void return_record_by_parent();
+
+  virtual bool vers_can_native(THD *thd)
+  {
+    if (thd->lex->part_info)
+    {
+      // PARTITION BY SYSTEM_TIME is not supported for now
+      return thd->lex->part_info->part_type != VERSIONING_PARTITION;
+    }
+    else
+    {
+      bool can= true;
+      for (uint i= 0; i < m_tot_parts && can; i++)
+        can= can && m_file[i]->vers_can_native(thd);
+      return can;
+    }
+  }
 
   /*
     -------------------------------------------------------------------------
@@ -1041,6 +1056,10 @@ public:
     with hidden primary key)
     (No handler has this limitation currently)
 
+    HA_WANTS_PRIMARY_KEY:
+    Can't define a table without primary key except sequences
+    (Only InnoDB has this when using innodb_force_primary_key == ON)
+
     HA_STATS_RECORDS_IS_EXACT:
     Does the counter of records after the info call specify an exact
     value or not. If it does this flag is set.
@@ -1424,18 +1443,6 @@ public:
     void append_row_to_str(String &str);
     public:
 
-  /*
-    -------------------------------------------------------------------------
-    Admin commands not supported currently (almost purely MyISAM routines)
-    This means that the following methods are not implemented:
-    -------------------------------------------------------------------------
-
-    virtual int backup(TD* thd, HA_CHECK_OPT *check_opt);
-    virtual int restore(THD* thd, HA_CHECK_OPT *check_opt);
-    virtual int dump(THD* thd, int fd = -1);
-    virtual int net_read_dump(NET* net);
-  */
-    virtual uint checksum() const;
   /* Enabled keycache for performance reasons, WL#4571 */
     virtual int assign_to_keycache(THD* thd, HA_CHECK_OPT *check_opt);
     virtual int preload_keys(THD* thd, HA_CHECK_OPT* check_opt);

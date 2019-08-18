@@ -1,5 +1,5 @@
-/* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2018, MariaDB Corporation
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2019, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /**
   @defgroup Semantic_Analysis Semantic Analysis
@@ -32,6 +32,10 @@
 #include "sp.h"                       // enum stored_procedure_type
 #include "sql_tvc.h"
 #include "item.h"
+
+/* Used for flags of nesting constructs */
+#define SELECT_NESTING_MAP_SIZE 64
+typedef Bitmap<SELECT_NESTING_MAP_SIZE> nesting_map;
 
 /* YACC and LEX Definitions */
 
@@ -177,6 +181,16 @@ enum enum_view_suid
   VIEW_SUID_DEFINER= 1,
   VIEW_SUID_DEFAULT= 2
 };
+
+
+enum plsql_cursor_attr_t
+{
+  PLSQL_CURSOR_ATTR_ISOPEN,
+  PLSQL_CURSOR_ATTR_FOUND,
+  PLSQL_CURSOR_ATTR_NOTFOUND,
+  PLSQL_CURSOR_ATTR_ROWCOUNT
+};
+
 
 /* These may not be declared yet */
 class Table_ident;
@@ -715,11 +729,6 @@ public:
   friend bool mysql_new_select(LEX *lex, bool move_down, SELECT_LEX *sel);
   friend bool mysql_make_view(THD *thd, TABLE_SHARE *share, TABLE_LIST *table,
                               bool open_view_no_parse);
-  friend bool mysql_derived_prepare(THD *thd, LEX *lex,
-                                  TABLE_LIST *orig_table_list);
-  friend bool mysql_derived_merge(THD *thd, LEX *lex,
-                                  TABLE_LIST *orig_table_list);
-  friend bool TABLE_LIST::init_derived(THD *thd, bool init_view);
 private:
   void fast_exclude();
 };
@@ -791,6 +800,12 @@ public:
     table for it
   */
   Item_int *intersect_mark;
+  /**
+     TRUE if the unit contained TVC at the top level that has been wrapped
+     into SELECT:
+     VALUES (v1) ... (vn) => SELECT * FROM (VALUES (v1) ... (vn)) as tvc
+  */
+  bool with_wrapped_tvc;
   /**
     Pointer to 'last' select, or pointer to select where we stored
     global parameters for union.
@@ -887,6 +902,7 @@ public:
   bool union_needs_tmp_table();
 
   void set_unique_exclude();
+  bool check_distinct_in_union();
 
   friend struct LEX;
   friend int subselect_union_engine::exec();
@@ -916,6 +932,10 @@ public:
   Grouping_tmp_field(Field *fld, Item *item) 
      :tmp_field(fld), producing_item(item) {}
 };
+
+
+#define TOUCHED_SEL_COND 1/* WHERE/HAVING/ON should be reinited before use */
+#define TOUCHED_SEL_DERIVED (1<<1)/* derived should be reinited before use */
 
 /*
   SELECT_LEX - store information of parsed SELECT statment
@@ -1103,7 +1123,8 @@ public:
     subquery. Prepared statements work OK in that regard, as in
     case of an error during prepare the PS is not created.
   */
-  bool first_execution;
+  uint8 changed_elements; // see TOUCHED_SEL_*
+  /* TODO: add foloowing first_* to bitmap above */
   bool first_natural_join_processing;
   bool first_cond_optimization;
   /* do not wrap view fields with Item_ref */
@@ -1205,10 +1226,12 @@ public:
   TABLE_LIST *end_nested_join(THD *thd);
   TABLE_LIST *nest_last_join(THD *thd);
   void add_joined_table(TABLE_LIST *table);
+  bool add_cross_joined_table(TABLE_LIST *left_op, TABLE_LIST *right_op,
+                              bool straight_fl);
   TABLE_LIST *convert_right_join();
   List<Item>* get_item_list();
   ulong get_table_join_options();
-  void set_lock_for_tables(thr_lock_type lock_type);
+  void set_lock_for_tables(thr_lock_type lock_type, bool for_update);
   inline void init_order()
   {
     order_list.elements= 0;
@@ -1962,6 +1985,38 @@ public:
     DBUG_ASSERT(accessed_table >= 0 && accessed_table < STMT_ACCESS_TABLE_COUNT);
 
     DBUG_RETURN((stmt_accessed_table_flag & (1U << accessed_table)) != 0);
+  }
+
+  /**
+    Checks either a trans/non trans temporary table is being accessed while
+    executing a statement.
+
+    @return
+      @retval TRUE  if a temporary table is being accessed
+      @retval FALSE otherwise
+  */
+  inline bool stmt_accessed_temp_table()
+  {
+    DBUG_ENTER("THD::stmt_accessed_temp_table");
+    DBUG_RETURN(stmt_accessed_non_trans_temp_table() ||
+                stmt_accessed_trans_temp_table());
+  }
+
+  /**
+    Checks if a temporary transactional table is being accessed while executing
+    a statement.
+
+    @return
+      @retval TRUE  if a temporary transactional table is being accessed
+      @retval FALSE otherwise
+  */
+  inline bool stmt_accessed_trans_temp_table()
+  {
+    DBUG_ENTER("THD::stmt_accessed_trans_temp_table");
+
+    DBUG_RETURN((stmt_accessed_table_flag &
+                ((1U << STMT_READS_TEMP_TRANS_TABLE) |
+                 (1U << STMT_WRITES_TEMP_TRANS_TABLE))) != 0);
   }
 
   /**
@@ -2803,6 +2858,11 @@ struct LEX: public Query_tables_list
      with clause in the current statement
   */
   With_clause **with_clauses_list_last_next;
+  /*
+    When a copy of a with element is parsed this is set to the offset of
+    the with element in the input string, otherwise it's set to 0
+  */
+  my_ptrdiff_t clone_spec_offset;
 
   Create_view_info *create_view;
 
@@ -2835,6 +2895,10 @@ struct LEX: public Query_tables_list
   String *wild; /* Wildcard in SHOW {something} LIKE 'wild'*/ 
   sql_exchange *exchange;
   select_result *result;
+  /**
+    @c the two may also hold BINLOG arguments: either comment holds a
+    base64-char string or both represent the BINLOG fragment user variables.
+  */
   LEX_CSTRING comment, ident;
   LEX_USER *grant_user;
   XID *xid;
@@ -3006,7 +3070,7 @@ public:
 
   enum enum_yes_no_unknown tx_chain, tx_release;
   bool safe_to_cache_query;
-  bool subqueries, ignore;
+  bool ignore;
   st_parsing_options parsing_options;
   Alter_info alter_info;
   /*
@@ -3025,7 +3089,6 @@ public:
   sp_name *spname;
   bool sp_lex_in_use;   // Keep track on lex usage in SPs for error handling
   bool all_privileges;
-  bool proxy_priv;
 
   sp_pcontext *spcont;
 
@@ -3128,7 +3191,7 @@ public:
   */
   DYNAMIC_ARRAY delete_gtid_domain;
   static const ulong initial_gtid_domain_buffer_size= 16;
-  ulong gtid_domain_static_buffer[initial_gtid_domain_buffer_size];
+  uint32 gtid_domain_static_buffer[initial_gtid_domain_buffer_size];
 
   inline void set_limit_rows_examined()
   {
@@ -3262,9 +3325,9 @@ public:
     return context_stack.push_front(context, mem_root);
   }
 
-  void pop_context()
+  Name_resolution_context *pop_context()
   {
-    context_stack.pop();
+    return context_stack.pop();
   }
 
   bool copy_db_to(LEX_CSTRING *to);
@@ -3633,6 +3696,10 @@ public:
   Item *make_item_colon_ident_ident(THD *thd,
                                     const Lex_ident_cli_st *a,
                                     const Lex_ident_cli_st *b);
+  // PLSQL: cursor%ISOPEN etc
+  Item *make_item_plsql_cursor_attr(THD *thd, const LEX_CSTRING *name,
+                                    plsql_cursor_attr_t attr);
+
   // For "SELECT @@var", "SELECT @@var.field"
   Item *make_item_sysvar(THD *thd,
                          enum_var_type type,
@@ -3713,9 +3780,9 @@ public:
   /* Integer range FOR LOOP methods */
   sp_variable *sp_add_for_loop_variable(THD *thd, const LEX_CSTRING *name,
                                         Item *value);
-  sp_variable *sp_add_for_loop_upper_bound(THD *thd, Item *value)
+  sp_variable *sp_add_for_loop_target_bound(THD *thd, Item *value)
   {
-    LEX_CSTRING name= { STRING_WITH_LEN("[upper_bound]") };
+    LEX_CSTRING name= { STRING_WITH_LEN("[target_bound]") };
     return sp_add_for_loop_variable(thd, &name, value);
   }
   bool sp_for_loop_intrange_declarations(THD *thd, Lex_for_loop_st *loop,
@@ -3922,6 +3989,31 @@ public:
   bool tmp_table() const { return create_info.tmp_table(); }
   bool if_exists() const { return create_info.if_exists(); }
 
+  /*
+    Run specified phases for derived tables/views in the given list
+
+    @param table_list - list of derived tables/view to handle
+    @param phase      - phases to process tables/views through
+
+    @details
+    This method runs phases specified by the 'phases' on derived
+    tables/views found in the 'table_list' with help of the
+    TABLE_LIST::handle_derived function.
+    'this' is passed as an argument to the TABLE_LIST::handle_derived.
+
+    @return false -  ok
+    @return true  -  error
+  */
+  bool handle_list_of_derived(TABLE_LIST *table_list, uint phases)
+  {
+    for (TABLE_LIST *tl= table_list; tl; tl= tl->next_local)
+    {
+      if (tl->is_view_or_derived() && tl->handle_derived(this, phases))
+        return true;
+    }
+    return false;
+  }
+
   SELECT_LEX *exclude_last_select();
   bool add_unit_in_brackets(SELECT_LEX *nselect);
   void check_automatic_up(enum sub_select_type type);
@@ -4009,15 +4101,18 @@ public:
 class Yacc_state
 {
 public:
-  Yacc_state()
-  {
-    reset();
-  }
+  Yacc_state() : yacc_yyss(NULL), yacc_yyvs(NULL) { reset(); }
 
   void reset()
   {
-    yacc_yyss= NULL;
-    yacc_yyvs= NULL;
+    if (yacc_yyss != NULL) {
+      my_free(yacc_yyss);
+      yacc_yyss = NULL;
+    }
+    if (yacc_yyvs != NULL) {
+      my_free(yacc_yyvs);
+      yacc_yyvs = NULL;
+    }
     m_set_signal_info.clear();
     m_lock_type= TL_READ_DEFAULT;
     m_mdl_type= MDL_SHARED_READ;
@@ -4084,18 +4179,6 @@ public:
 };
 
 /**
-  Input parameters to the parser.
-*/
-struct Parser_input
-{
-  bool m_compute_digest;
-
-  Parser_input()
-    : m_compute_digest(false)
-  {}
-};
-
-/**
   Internal state of the parser.
   The complete state consist of:
   - state data used during lexical parsing,
@@ -4122,7 +4205,6 @@ public:
   ~Parser_state()
   {}
 
-  Parser_input m_input;
   Lex_input_stream m_lip;
   Yacc_state m_yacc;
 

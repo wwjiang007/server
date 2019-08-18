@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef SQL_CLASS_INCLUDED
 #define SQL_CLASS_INCLUDED
@@ -38,6 +38,7 @@
 #include "thr_timer.h"
 #include "thr_malloc.h"
 #include "log_slow.h"      /* LOG_SLOW_DISABLE_... */
+#include <my_tree.h>
 
 #include "sql_digest_stream.h"            // sql_digest_state
 
@@ -581,6 +582,16 @@ typedef struct system_variables
   ha_rows max_join_size;
   ha_rows expensive_subquery_limit;
   ulong auto_increment_increment, auto_increment_offset;
+#ifdef WITH_WSREP
+  /*
+    Stored values of the auto_increment_increment and auto_increment_offset
+    that are will be restored when wsrep_auto_increment_control will be set
+    to 'OFF', because the setting it to 'ON' leads to overwriting of the
+    original values (which are set by the user) by calculated ones (which
+    are based on the cluster size):
+  */
+  ulong saved_auto_increment_increment, saved_auto_increment_offset;
+#endif /* WITH_WSREP */
   uint eq_range_index_dive_limit;
   ulong column_compression_zlib_strategy;
   ulong lock_wait_timeout;
@@ -2365,6 +2376,9 @@ public:
   uint dbug_sentry; // watch out for memory corruption
 #endif
   struct st_my_thread_var *mysys_var;
+
+  /* Original charset number from the first client packet, or COM_CHANGE_USER*/
+  CHARSET_INFO *org_charset;
 private:
   /*
     Type of current query: COM_STMT_PREPARE, COM_QUERY, etc. Set from
@@ -2430,10 +2444,27 @@ public:
   */ 
   bool create_tmp_table_for_derived;
 
+  /* The flag to force reading statistics from EITS tables */
+  bool force_read_stats;
+
   bool save_prep_leaf_list;
 
   /* container for handler's private per-connection data */
   Ha_data ha_data[MAX_HA];
+
+  /**
+    Bit field for the state of binlog warnings.
+
+    The first Lex::BINLOG_STMT_UNSAFE_COUNT bits list all types of
+    unsafeness that the current statement has.
+
+    This must be a member of THD and not of LEX, because warnings are
+    detected and issued in different places (@c
+    decide_logging_format() and @c binlog_query(), respectively).
+    Between these calls, the THD->lex object may change; e.g., if a
+    stored routine is invoked.  Only THD persists between the calls.
+  */
+  uint32 binlog_unsafe_warning_flags;
 
 #ifndef MYSQL_CLIENT
   binlog_cache_mngr *  binlog_setup_trx_data();
@@ -2543,20 +2574,6 @@ private:
     logged.  This can only be set from @c decide_logging_format().
   */
   enum_binlog_format current_stmt_binlog_format;
-
-  /**
-    Bit field for the state of binlog warnings.
-
-    The first Lex::BINLOG_STMT_UNSAFE_COUNT bits list all types of
-    unsafeness that the current statement has.
-
-    This must be a member of THD and not of LEX, because warnings are
-    detected and issued in different places (@c
-    decide_logging_format() and @c binlog_query(), respectively).
-    Between these calls, the THD->lex object may change; e.g., if a
-    stored routine is invoked.  Only THD persists between the calls.
-  */
-  uint32 binlog_unsafe_warning_flags;
 
   /*
     Number of outstanding table maps, i.e., table maps in the
@@ -3238,6 +3255,7 @@ public:
     added to the list of audit plugins which are currently in use.
   */
   unsigned long audit_class_mask[MYSQL_AUDIT_CLASS_MASK_SIZE];
+  int audit_plugin_version;
 #endif
 
 #if defined(ENABLED_DEBUG_SYNC)
@@ -3247,17 +3265,12 @@ public:
   /**
     @param id                thread identifier
     @param is_wsrep_applier  thread type
-    @param skip_lock         instruct whether @c LOCK_global_system_variables
-                             is already locked, to not acquire it then.
   */
-  THD(my_thread_id id, bool is_wsrep_applier= false, bool skip_lock= false);
+  THD(my_thread_id id, bool is_wsrep_applier= false);
 
   ~THD();
-  /**
-    @param skip_lock         instruct whether @c LOCK_global_system_variables
-                             is already locked, to not acquire it then.
-  */
-  void init(bool skip_lock= false);
+
+  void init();
   /*
     Initialize memory roots necessary for query processing and (!)
     pre-allocate memory for it. We can't do that in THD constructor because
@@ -3788,8 +3801,8 @@ public:
   void add_changed_table(TABLE *table);
   void add_changed_table(const char *key, size_t key_length);
   CHANGED_TABLE_LIST * changed_table_dup(const char *key, size_t key_length);
-  void prepare_explain_fields(select_result *result, List<Item> *field_list,
-                              uint8 explain_flags, bool is_analyze);
+  int prepare_explain_fields(select_result *result, List<Item> *field_list,
+                             uint8 explain_flags, bool is_analyze);
   int send_explain_fields(select_result *result, uint8 explain_flags,
                           bool is_analyze);
   void make_explain_field_list(List<Item> &field_list, uint8 explain_flags,
@@ -4442,6 +4455,18 @@ public:
   }
   void leave_locked_tables_mode();
   int decide_logging_format(TABLE_LIST *tables);
+  /*
+   In Some cases when decide_logging_format is called it does not have all
+   information to decide the logging format. So that cases we call decide_logging_format_2
+   at later stages in execution.
+   One example would be binlog format for IODKU but column with unique key is not inserted.
+   We dont have inserted columns info when we call decide_logging_format so on later stage we call
+   decide_logging_format_low
+
+   @returns 0 if no format is changed
+            1 if there is change in binlog format
+  */
+  int decide_logging_format_low(TABLE *table);
 
   enum need_invoker { INVOKER_NONE=0, INVOKER_USER, INVOKER_ROLE};
   void binlog_invoker(bool role) { m_binlog_invoker= role ? INVOKER_ROLE : INVOKER_USER; }
@@ -4628,6 +4653,7 @@ public:
 
   TMP_TABLE_SHARE* save_tmp_table_share(TABLE *table);
   void restore_tmp_table_share(TMP_TABLE_SHARE *share);
+  void close_unused_temporary_table_instances(const TABLE_LIST *tl);
 
 private:
   /* Whether a lock has been acquired? */
@@ -4713,6 +4739,14 @@ public:
   ulong                     wsrep_affected_rows;
   bool                      wsrep_replicate_GTID;
   bool                      wsrep_skip_wsrep_GTID;
+  /* This flag is set when innodb do an intermediate commit to
+  processing the LOAD DATA INFILE statement by splitting it into 10K
+  rows chunks. If flag is set, then binlog rotation is not performed
+  while intermediate transaction try to commit, because in this case
+  rotation causes unregistration of innodb handler. Later innodb handler
+  registered again, but replication of last chunk of rows is skipped
+  by the innodb engine: */
+  bool                      wsrep_split_flag;
 #endif /* WITH_WSREP */
 
   /* Handling of timeouts for commands */
@@ -4822,13 +4856,6 @@ public:
   Item *sp_fix_func_item(Item **it_addr);
   Item *sp_prepare_func_item(Item **it_addr, uint cols= 1);
   bool sp_eval_expr(Field *result_field, Item **expr_item_ptr);
-
-  inline void prepare_logs_for_admin_command()
-  {
-    enable_slow_log&= !MY_TEST(variables.log_slow_disabled_statements &
-                               LOG_SLOW_DISABLE_ADMIN);
-    query_plan_flags|= QPLAN_ADMIN;
-  }
 };
 
 inline void add_to_active_threads(THD *thd)
@@ -4933,6 +4960,7 @@ public:
   void reset(THD *thd_arg) { thd= thd_arg; }
 };
 
+class select_result_interceptor;
 
 /*
   Interface for sending tabular data, together with some other stuff:
@@ -5031,11 +5059,18 @@ public:
 
   /*
     This returns
-    - FALSE if the class sends output row to the client
-    - TRUE if the output is set elsewhere (a file, @variable, or table).
-    Currently all intercepting classes derive from select_result_interceptor.
+    - NULL if the class sends output row to the client
+    - this if the output is set elsewhere (a file, @variable, or table).
   */
-  virtual bool is_result_interceptor()=0;
+  virtual select_result_interceptor *result_interceptor()=0;
+
+  /*
+    This method is used to distinguish an normal SELECT from the cursor
+    structure discovery for cursor%ROWTYPE routine variables.
+    If this method returns "true", then a SELECT execution performs only
+    all preparation stages, but does not fetch any rows.
+  */
+  virtual bool view_structure_only() const { return false; }
 };
 
 
@@ -5103,7 +5138,7 @@ public:
   }              /* Remove gcc warning */
   uint field_count(List<Item> &fields) const { return 0; }
   bool send_result_set_metadata(List<Item> &fields, uint flag) { return FALSE; }
-  bool is_result_interceptor() { return true; }
+  select_result_interceptor *result_interceptor() { return this; }
 
   /*
     Instruct the object to not call my_ok(). Client output will be handled
@@ -5155,9 +5190,13 @@ private:
   {
     List<sp_variable> *spvar_list;
     uint field_count;
+    bool m_view_structure_only;
     bool send_data_to_variable_list(List<sp_variable> &vars, List<Item> &items);
   public:
-    Select_fetch_into_spvars(THD *thd_arg): select_result_interceptor(thd_arg) {}
+    Select_fetch_into_spvars(THD *thd_arg, bool view_structure_only)
+     :select_result_interceptor(thd_arg),
+      m_view_structure_only(view_structure_only)
+    {}
     void reset(THD *thd_arg)
     {
       select_result_interceptor::reset(thd_arg);
@@ -5170,16 +5209,17 @@ private:
     virtual bool send_eof() { return FALSE; }
     virtual int send_data(List<Item> &items);
     virtual int prepare(List<Item> &list, SELECT_LEX_UNIT *u);
+    virtual bool view_structure_only() const { return m_view_structure_only; }
 };
 
 public:
   sp_cursor()
-   :result(NULL),
+   :result(NULL, false),
     m_lex_keeper(NULL),
     server_side_cursor(NULL)
   { }
-  sp_cursor(THD *thd_arg, sp_lex_keeper *lex_keeper)
-   :result(thd_arg),
+  sp_cursor(THD *thd_arg, sp_lex_keeper *lex_keeper, bool view_structure_only)
+   :result(thd_arg, view_structure_only),
     m_lex_keeper(lex_keeper),
     server_side_cursor(NULL)
   {}
@@ -5190,8 +5230,6 @@ public:
   sp_lex_keeper *get_lex_keeper() { return m_lex_keeper; }
 
   int open(THD *thd);
-
-  int open_view_structure_only(THD *thd);
 
   int close(THD *thd);
 
@@ -5234,7 +5272,7 @@ public:
   virtual bool check_simple_select() const { return FALSE; }
   void abort_result_set();
   virtual void cleanup();
-  bool is_result_interceptor() { return false; }
+  select_result_interceptor *result_interceptor() { return NULL; }
 };
 
 
@@ -5580,10 +5618,16 @@ class select_union_recursive :public select_unit
   TABLE *first_rec_table_to_update;
   /* The temporary tables used for recursive table references */
   List<TABLE> rec_tables;
+  /*
+    The count of how many times cleanup() was called with cleaned==false
+    for the unit specifying the recursive CTE for which this object was created
+    or for the unit specifying a CTE that mutually recursive with this CTE.
+  */
+  uint cleanup_count;
 
   select_union_recursive(THD *thd_arg):
     select_unit(thd_arg),
-    incr_table(0), first_rec_table_to_update(0) {};
+    incr_table(0), first_rec_table_to_update(0), cleanup_count(0) {};
 
   int send_data(List<Item> &items);
   bool create_result_table(THD *thd, List<Item> *column_types,
@@ -6268,21 +6312,26 @@ public:
 #define CF_UPDATES_DATA (1U << 18)
 
 /**
+  Not logged into slow log as "admin commands"
+*/
+#define CF_ADMIN_COMMAND (1U << 19)
+
+/**
   SP Bulk execution safe
 */
-#define CF_SP_BULK_SAFE (1U << 19)
+#define CF_SP_BULK_SAFE (1U << 20)
 /**
   SP Bulk execution optimized
 */
-#define CF_SP_BULK_OPTIMIZED (1U << 20)
+#define CF_SP_BULK_OPTIMIZED (1U << 21)
 /**
   If command creates or drops a table
 */
-#define CF_SCHEMA_CHANGE (1U << 21)
+#define CF_SCHEMA_CHANGE (1U << 22)
 /**
   If command creates or drops a database
 */
-#define CF_DB_CHANGE (1U << 22)
+#define CF_DB_CHANGE (1U << 23)
 
 /* Bits in server_command_flags */
 

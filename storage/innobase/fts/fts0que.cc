@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2007, 2018, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -25,8 +25,6 @@ Created 2007/03/27 Sunny Bains
 Completed 2011/7/10 Sunny and Jimmy Yang
 *******************************************************/
 
-#include "ha_prototypes.h"
-
 #include "dict0dict.h"
 #include "ut0rbt.h"
 #include "row0sel.h"
@@ -36,7 +34,6 @@ Completed 2011/7/10 Sunny and Jimmy Yang
 #include "fts0pars.h"
 #include "fts0types.h"
 #include "fts0plugin.h"
-#include "ut0new.h"
 
 #include <iomanip>
 #include <vector>
@@ -75,7 +72,7 @@ struct fts_query_t {
 
 	fts_table_t	fts_index_table;/*!< FTS auxiliary index table def */
 
-	ulint		total_size;	/*!< total memory size used by query */
+	size_t		total_size;	/*!< total memory size used by query */
 
 	fts_doc_ids_t*	deleted;	/*!< Deleted doc ids that need to be
 					filtered from the output */
@@ -3964,7 +3961,6 @@ fts_query(
 
 	query.fts_common_table.type = FTS_COMMON_TABLE;
 	query.fts_common_table.table_id = index->table->id;
-	query.fts_common_table.parent = index->table->name.m_name;
 	query.fts_common_table.table = index->table;
 
 	charset = fts_index_get_charset(index);
@@ -3972,7 +3968,6 @@ fts_query(
 	query.fts_index_table.type = FTS_INDEX_TABLE;
 	query.fts_index_table.index_id = index->id;
 	query.fts_index_table.table_id = index->table->id;
-	query.fts_index_table.parent = index->table->name.m_name;
 	query.fts_index_table.charset = charset;
 	query.fts_index_table.table = index->table;
 

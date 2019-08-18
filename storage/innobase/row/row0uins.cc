@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -429,7 +429,7 @@ row_undo_ins_parse_undo_rec(
 		dict_table_t* table = node->table;
 		ut_ad(!table->is_temporary());
 		ut_ad(dict_table_is_file_per_table(table)
-		      == !is_system_tablespace(table->space->id));
+		      == !is_system_tablespace(table->space_id));
 		size_t len = mach_read_from_2(node->undo_rec)
 			+ size_t(node->undo_rec - ptr) - 2;
 		ptr[len] = 0;

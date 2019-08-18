@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /**
@@ -62,8 +62,21 @@ const char field_separator=',';
 #define BLOB_PACK_LENGTH_TO_MAX_LENGH(arg) \
                         ((ulong) ((1LL << MY_MIN(arg, 4) * 8) - 1))
 
-#define ASSERT_COLUMN_MARKED_FOR_READ DBUG_ASSERT(!table || (!table->read_set || bitmap_is_set(table->read_set, field_index)))
-#define ASSERT_COLUMN_MARKED_FOR_WRITE_OR_COMPUTED DBUG_ASSERT(is_stat_field || !table || (!table->write_set || bitmap_is_set(table->write_set, field_index) || (table->vcol_set && bitmap_is_set(table->vcol_set, field_index))))
+// Column marked for read or the field set to read out or record[0] or [1]
+#define ASSERT_COLUMN_MARKED_FOR_READ                              \
+  DBUG_ASSERT(!table ||                                            \
+              (!table->read_set ||                                 \
+               bitmap_is_set(table->read_set, field_index) ||      \
+               (!(ptr >= table->record[0] &&                       \
+                  ptr < table->record[0] + table->s->reclength))))
+
+#define ASSERT_COLUMN_MARKED_FOR_WRITE_OR_COMPUTED                   \
+  DBUG_ASSERT(is_stat_field || !table ||                             \
+              (!table->write_set ||                                  \
+               bitmap_is_set(table->write_set, field_index) ||       \
+               (!(ptr >= table->record[0] &&                         \
+                  ptr < table->record[0] + table->s->reclength))) || \
+              (table->vcol_set && bitmap_is_set(table->vcol_set, field_index)))
 
 #define FLAGSTR(S,F) ((S) & (F) ? #F " " : "")
 
@@ -2069,7 +2082,7 @@ bool Field_int::get_date(MYSQL_TIME *ltime,ulonglong fuzzydate)
   longlong nr= val_int();
   bool neg= !(flags & UNSIGNED_FLAG) && nr < 0;
   return int_to_datetime_with_warn(neg, neg ? -nr : nr, ltime, fuzzydate,
-                                   field_name.str);
+                                   table->s, field_name.str);
 }
 
 
@@ -2384,7 +2397,7 @@ int Field::set_default()
   /* Copy constant value stored in s->default_values */
   my_ptrdiff_t l_offset= (my_ptrdiff_t) (table->s->default_values -
                                         table->record[0]);
-  memcpy(ptr, ptr + l_offset, pack_length());
+  memcpy(ptr, ptr + l_offset, pack_length_in_rec());
   if (maybe_null_in_table())
     *null_ptr= ((*null_ptr & (uchar) ~null_bit) |
                 (null_ptr[l_offset] & null_bit));
@@ -3075,6 +3088,12 @@ Field *Field_decimal::make_new_field(MEM_ROOT *root, TABLE *new_table,
 ** Field_new_decimal
 ****************************************************************************/
 
+static uint get_decimal_precision(uint len, uint8 dec, bool unsigned_val)
+{
+  uint precision= my_decimal_length_to_precision(len, dec, unsigned_val);
+  return MY_MIN(precision, DECIMAL_MAX_PRECISION);
+}
+
 Field_new_decimal::Field_new_decimal(uchar *ptr_arg,
                                      uint32 len_arg, uchar *null_ptr_arg,
                                      uchar null_bit_arg,
@@ -3085,8 +3104,7 @@ Field_new_decimal::Field_new_decimal(uchar *ptr_arg,
   :Field_num(ptr_arg, len_arg, null_ptr_arg, null_bit_arg,
              unireg_check_arg, field_name_arg, dec_arg, zero_arg, unsigned_arg)
 {
-  precision= my_decimal_length_to_precision(len_arg, dec_arg, unsigned_arg);
-  set_if_smaller(precision, DECIMAL_MAX_PRECISION);
+  precision= get_decimal_precision(len_arg, dec_arg, unsigned_arg);
   DBUG_ASSERT((precision <= DECIMAL_MAX_PRECISION) &&
               (dec <= DECIMAL_MAX_SCALE));
   bin_size= my_decimal_get_binary_size(precision, dec);
@@ -3403,7 +3421,8 @@ bool Field_new_decimal::get_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
 {
   my_decimal value;
   return decimal_to_datetime_with_warn(val_decimal(&value),
-                                       ltime, fuzzydate, field_name.str);
+                                       ltime, fuzzydate, table->s,
+                                       field_name.str);
 }
 
 
@@ -4528,7 +4547,7 @@ longlong Field_float::val_int(void)
 {
   float j;
   float4get(j,ptr);
-  return (longlong) rint(j);
+  return Converter_double_to_longlong(j, false).result();
 }
 
 
@@ -4537,34 +4556,15 @@ String *Field_float::val_str(String *val_buffer,
 {
   ASSERT_COLUMN_MARKED_FOR_READ;
   DBUG_ASSERT(!zerofill || field_length <= MAX_FIELD_CHARLENGTH);
-  float nr;
-  float4get(nr,ptr);
 
-  uint to_length= 70;
-  if (val_buffer->alloc(to_length))
+  if (Float(ptr).to_string(val_buffer, dec))
   {
     my_error(ER_OUT_OF_RESOURCES, MYF(0));
     return val_buffer;
   }
 
-  char *to=(char*) val_buffer->ptr();
-  size_t len;
-
-  if (dec >= FLOATING_POINT_DECIMALS)
-    len= my_gcvt(nr, MY_GCVT_ARG_FLOAT, to_length - 1, to, NULL);
-  else
-  {
-    /*
-      We are safe here because the buffer length is 70, and
-      fabs(float) < 10^39, dec < FLOATING_POINT_DECIMALS. So the resulting string
-      will be not longer than 69 chars + terminating '\0'.
-    */
-    len= my_fcvt(nr, dec, to, NULL);
-  }
-  val_buffer->length((uint) len);
   if (zerofill)
     prepend_zeros(val_buffer);
-  val_buffer->set_charset(&my_charset_numeric);
   return val_buffer;
 }
 
@@ -4857,7 +4857,8 @@ bool Field_real::get_date(MYSQL_TIME *ltime,ulonglong fuzzydate)
 {
   ASSERT_COLUMN_MARKED_FOR_READ;
   double nr= val_real();
-  return double_to_datetime_with_warn(nr, ltime, fuzzydate, field_name.str);
+  return double_to_datetime_with_warn(nr, ltime, fuzzydate,
+                                      table->s, field_name.str);
 }
 
 
@@ -6376,7 +6377,7 @@ bool Field_year::get_date(MYSQL_TIME *ltime,ulonglong fuzzydate)
   if (tmp || field_length != 4)
     tmp+= 1900;
   return int_to_datetime_with_warn(false, tmp * 10000,
-                                    ltime, fuzzydate, field_name.str);
+                                   ltime, fuzzydate, table->s, field_name.str);
 }
 
 
@@ -6938,8 +6939,11 @@ Field_longstr::check_string_copy_error(const String_copier *copier,
   if (likely(!(pos= copier->most_important_error_pos())))
     return FALSE;
 
-  convert_to_printable(tmp, sizeof(tmp), pos, (end - pos), cs, 6);
-  set_warning_truncated_wrong_value("string", tmp);
+  if (!is_stat_field)
+  {
+    convert_to_printable(tmp, sizeof(tmp), pos, (end - pos), cs, 6);
+    set_warning_truncated_wrong_value("string", tmp);
+  }
   return TRUE;
 }
 
@@ -8589,7 +8593,11 @@ void Field_blob::sql_type(String &res) const
   }
   res.set_ascii(str,length);
   if (charset() == &my_charset_bin)
+  {
     res.append(STRING_WITH_LEN("blob"));
+    if (packlength == 2 && (get_thd()->variables.sql_mode & MODE_ORACLE))
+      res.append(STRING_WITH_LEN("(65535)"));
+  }
   else
   {
     res.append(STRING_WITH_LEN("text"));
@@ -8924,10 +8932,18 @@ int Field_geom::store(const char *from, size_t length, CHARSET_INFO *cs)
         geom_type != Field::GEOM_GEOMETRYCOLLECTION &&
         (uint32) geom_type != wkb_type)
     {
+      const char *db= table->s->db.str;
+      const char *tab_name= table->s->table_name.str;
+
+      if (!db)
+        db= "";
+      if (!tab_name)
+        tab_name= "";
+
       my_error(ER_TRUNCATED_WRONG_VALUE_FOR_FIELD, MYF(0),
                Geometry::ci_collection[geom_type]->m_name.str,
                Geometry::ci_collection[wkb_type]->m_name.str,
-               field_name.str,
+               db, tab_name, field_name.str,
                (ulong) table->in_use->get_stmt_da()->
                current_row_for_warning());
       goto err_exit;
@@ -10289,12 +10305,9 @@ void Column_definition::create_length_to_internal_length_bit()
 
 void Column_definition::create_length_to_internal_length_newdecimal()
 {
-  key_length= pack_length=
-    my_decimal_get_binary_size(my_decimal_length_to_precision((uint) length,
-                                                              decimals,
-                                                              flags &
-                                                              UNSIGNED_FLAG),
-                               decimals);
+  DBUG_ASSERT(length < UINT_MAX32);
+  uint prec= get_decimal_precision((uint)length, decimals, flags & UNSIGNED_FLAG);
+  key_length= pack_length= my_decimal_get_binary_size(prec, decimals);
 }
 
 
@@ -11022,6 +11035,7 @@ Column_definition::redefine_stage1_common(const Column_definition *dup_field,
   interval=     dup_field->interval;
   vcol_info=    dup_field->vcol_info;
   invisible=    dup_field->invisible;
+  check_constraint= dup_field->check_constraint;
 }
 
 
@@ -11095,20 +11109,48 @@ bool Column_definition::has_default_expression()
 
 bool Column_definition::set_compressed(const char *method)
 {
+  if (!method || !strcmp(method, zlib_compression_method->name))
+  {
+    unireg_check= Field::TMYSQL_COMPRESSED;
+    compression_method_ptr= zlib_compression_method;
+    return false;
+  }
+  my_error(ER_UNKNOWN_COMPRESSION_METHOD, MYF(0), method);
+  return true;
+}
+
+
+bool Column_definition::set_compressed_deprecated(THD *thd, const char *method)
+{
+  push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+                      ER_WARN_DEPRECATED_SYNTAX,
+                      ER_THD(thd, ER_WARN_DEPRECATED_SYNTAX),
+                      "<data type> <character set clause> ... COMPRESSED...",
+                      "'<data type> COMPRESSED... <character set clause> ...'");
+  return set_compressed(method);
+}
+
+
+bool
+Column_definition::set_compressed_deprecated_column_attribute(THD *thd,
+                                                              const char *pos,
+                                                              const char *method)
+{
+  if (compression_method_ptr)
+  {
+    /*
+      Compression method has already been set, e.g.:
+        a VARCHAR(10) COMPRESSED DEFAULT 10 COMPRESSED
+    */
+    thd->parse_error(ER_SYNTAX_ERROR, pos);
+    return true;
+  }
   enum enum_field_types sql_type= real_field_type();
   /* We can't use f_is_blob here as pack_flag is not yet set */
   if (sql_type == MYSQL_TYPE_VARCHAR || sql_type == MYSQL_TYPE_TINY_BLOB ||
       sql_type == MYSQL_TYPE_BLOB || sql_type == MYSQL_TYPE_MEDIUM_BLOB ||
       sql_type == MYSQL_TYPE_LONG_BLOB)
-  {
-    if (!method || !strcmp(method, zlib_compression_method->name))
-    {
-      unireg_check= Field::TMYSQL_COMPRESSED;
-      compression_method_ptr= zlib_compression_method;
-      return false;
-    }
-    my_error(ER_UNKNOWN_COMPRESSION_METHOD, MYF(0), method);
-  }
+    return set_compressed_deprecated(thd, method);
   else
     my_error(ER_WRONG_FIELD_SPEC, MYF(0), field_name.str);
   return true;
@@ -11213,7 +11255,8 @@ void Field::set_datetime_warning(Sql_condition::enum_warning_level level,
 {
   THD *thd= get_thd();
   if (thd->really_abort_on_warning() && level >= Sql_condition::WARN_LEVEL_WARN)
-    make_truncated_value_warning(thd, level, str, ts_type, field_name.str);
+    make_truncated_value_warning(thd, level, str, ts_type,
+                                 table->s, field_name.str);
   else
     set_warning(level, code, cuted_increment);
 }
@@ -11223,10 +11266,18 @@ void Field::set_warning_truncated_wrong_value(const char *type_arg,
                                               const char *value)
 {
   THD *thd= get_thd();
+  const char *db_name= table->s->db.str;
+  const char *table_name= table->s->table_name.str;
+
+  if (!db_name)
+    db_name= "";
+  if (!table_name)
+    table_name= "";
+
   push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                       ER_TRUNCATED_WRONG_VALUE_FOR_FIELD,
                       ER_THD(thd, ER_TRUNCATED_WRONG_VALUE_FOR_FIELD),
-                      type_arg, value, field_name.str,
+                      type_arg, value, db_name, table_name, field_name.str,
                       static_cast<ulong>(thd->get_stmt_da()->
                       current_row_for_warning()));
 }

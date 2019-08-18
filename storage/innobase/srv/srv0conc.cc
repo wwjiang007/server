@@ -26,7 +26,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -38,13 +38,11 @@ InnoDB concurrency manager
 Created 2011/04/18 Sunny Bains
 *******************************************************/
 
-#include "ha_prototypes.h"
-#include <mysql/service_thd_wait.h>
-
 #include "srv0srv.h"
 #include "trx0trx.h"
 #include "row0mysql.h"
 #include "dict0dict.h"
+#include <mysql/service_thd_wait.h>
 #include <mysql/service_wsrep.h>
 
 /** Number of times a thread is allowed to enter InnoDB within the same

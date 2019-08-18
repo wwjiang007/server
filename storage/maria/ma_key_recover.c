@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* Redo of index */
 
@@ -932,8 +932,6 @@ err:
      @retval 0      OK
      @retval 1      Error
 */
-
-long my_counter= 0;
 
 uint _ma_apply_redo_index(MARIA_HA *info,
                           LSN lsn, const uchar *header, uint head_length)

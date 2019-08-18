@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /**
   @file
@@ -31,6 +31,7 @@
 #include "uniques.h"
 #include "my_atomic.h"
 #include "sql_show.h"
+#include "sql_partition.h"
 
 /*
   The system variable 'use_stat_tables' can take one of the
@@ -1057,7 +1058,9 @@ public:
           else
           {
             table_field->collected_stats->min_value->val_str(&val);
-            stat_field->store(val.ptr(), val.length(), &my_charset_bin);
+            size_t length= Well_formed_prefix(val.charset(), val.ptr(),
+                           MY_MIN(val.length(), stat_field->field_length)).length();
+            stat_field->store(val.ptr(), length, &my_charset_bin);
           }
           break;
         case COLUMN_STAT_MAX_VALUE:
@@ -1066,7 +1069,9 @@ public:
           else
           {
             table_field->collected_stats->max_value->val_str(&val);
-            stat_field->store(val.ptr(), val.length(), &my_charset_bin);
+            size_t length= Well_formed_prefix(val.charset(), val.ptr(),
+                            MY_MIN(val.length(), stat_field->field_length)).length();
+            stat_field->store(val.ptr(), length, &my_charset_bin);
           }
           break;
         case COLUMN_STAT_NULLS_RATIO:
@@ -2180,7 +2185,10 @@ inline bool statistics_for_command_is_needed(THD *thd)
 {
   if (thd->bootstrap || thd->variables.use_stat_tables == NEVER)
     return FALSE;
-  
+
+  if (thd->force_read_stats)
+    return TRUE;
+
   switch(thd->lex->sql_command) {
   case SQLCOM_SELECT:
   case SQLCOM_INSERT:
@@ -2191,6 +2199,9 @@ inline bool statistics_for_command_is_needed(THD *thd)
   case SQLCOM_DELETE_MULTI:
   case SQLCOM_REPLACE:
   case SQLCOM_REPLACE_SELECT:
+  case SQLCOM_CREATE_TABLE:
+  case SQLCOM_SET_OPTION:
+  case SQLCOM_DO:
     break;
   default: 
     return FALSE;
@@ -3052,7 +3063,7 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
       }
     }
   }
-      
+
   table->stats_is_read= TRUE;
 
   DBUG_RETURN(0);
@@ -3272,6 +3283,9 @@ int read_statistics_for_tables_if_needed(THD *thd, TABLE_LIST *tables)
     if (!tl->is_view_or_derived() && !is_temporary_table(tl) && tl->table)
     { 
       TABLE_SHARE *table_share= tl->table->s;
+      if (table_share && !(table_share->table_category == TABLE_CATEGORY_USER))
+        continue;
+
       if (table_share && 
           table_share->stats_cb.stats_can_be_read &&
 	  !table_share->stats_cb.stats_is_read)
@@ -3282,12 +3296,13 @@ int read_statistics_for_tables_if_needed(THD *thd, TABLE_LIST *tables)
       if (table_share->stats_cb.stats_is_read)
         tl->table->stats_is_read= TRUE;
       if (thd->variables.optimizer_use_condition_selectivity > 3 && 
-          table_share && !table_share->stats_cb.histograms_are_read)
+          table_share && table_share->stats_cb.stats_can_be_read &&
+          !table_share->stats_cb.histograms_are_read)
       {
         (void) read_histograms_for_table(thd, tl->table, stat_tables);
         table_share->stats_cb.histograms_are_read= TRUE;
       }
-      if (table_share->stats_cb.stats_is_read)
+      if (table_share->stats_cb.histograms_are_read)
         tl->table->histograms_are_read= TRUE;
     }
   }  
@@ -3722,6 +3737,22 @@ void set_statistics_for_table(THD *thd, TABLE *table)
     (use_stat_table_mode <= COMPLEMENTARY ||
      !table->stats_is_read || read_stats->cardinality_is_null) ?
     table->file->stats.records : read_stats->cardinality;
+
+  /*
+    For partitioned table, EITS statistics is based on data from all partitions.
+
+    On the other hand, Partition Pruning figures which partitions will be
+    accessed and then computes the estimate of rows in used_partitions.
+
+    Use the estimate from Partition Pruning as it is typically more precise.
+    Ideally, EITS should provide per-partition statistics but this is not
+    implemented currently.
+  */
+#ifdef WITH_PARTITION_STORAGE_ENGINE
+    if (table->part_info)
+      table->used_stat_records= table->file->stats.records;
+#endif
+
   KEY *key_info, *key_info_end;
   for (key_info= table->key_info, key_info_end= key_info+table->s->keys;
        key_info < key_info_end; key_info++)
@@ -4039,4 +4070,38 @@ bool is_stat_table(const LEX_CSTRING *db, LEX_CSTRING *table)
     }
   }
   return false;
+}
+
+/*
+  Check wheter we can use EITS statistics for a field or not
+
+  TRUE : Use EITS for the columns
+  FALSE: Otherwise
+*/
+
+bool is_eits_usable(Field *field)
+{
+  Column_statistics* col_stats= field->read_stats;
+  
+  // check if column_statistics was allocated for this field
+  if (!col_stats)
+    return false;
+
+  DBUG_ASSERT(field->table->stats_is_read);
+
+  /*
+    (1): checks if we have EITS statistics for a particular column
+    (2): Don't use EITS for GEOMETRY columns
+    (3): Disabling reading EITS statistics for columns involved in the
+         partition list of a table. We assume the selecticivity for
+         such columns would be handled during partition pruning.
+  */
+
+  return !col_stats->no_stat_values_provided() &&        //(1)
+    field->type() != MYSQL_TYPE_GEOMETRY &&              //(2)
+#ifdef WITH_PARTITION_STORAGE_ENGINE
+    (!field->table->part_info ||
+     !field->table->part_info->field_in_partition_expr(field)) &&     //(3)
+#endif
+    true;
 }

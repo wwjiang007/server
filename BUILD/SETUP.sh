@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU Library General Public
 # License along with this library; if not, write to the Free
 # Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
-# MA 02110-1301, USA
+# MA 02110-1335  USA
 
 ########################################################################
 
@@ -122,7 +122,8 @@ get_make_parallel_flag
 # SSL library to use.--with-ssl will select our bundled yaSSL
 # implementation of SSL. --with-ssl=yes will first try system library
 # then the boundled one  --with-ssl=system will use the system library.
-SSL_LIBRARY=--with-ssl=system
+# We use bundled by default as this is guaranteed to work with Galera
+SSL_LIBRARY=--with-ssl
 
 if [ "x$warning_mode" = "xpedantic" ]; then
   warnings="-W -Wall -ansi -pedantic -Wno-long-long -Wno-unused -D_POSIX_SOURCE"
@@ -169,7 +170,7 @@ debug_cflags="-DEXTRA_DEBUG -DSAFE_MUTEX -DSAFEMALLOC"
 error_inject="--with-error-inject "
 #
 # Base C++ flags for all builds
-base_cxxflags="-felide-constructors -fexceptions -fno-rtti"
+base_cxxflags="-felide-constructors -fexceptions"
 #
 # Flags for optimizing builds.
 # Be as fast as we can be without losing our ability to backtrace.
@@ -194,6 +195,8 @@ base_configs="$base_configs --with-extra-charsets=complex "
 base_configs="$base_configs --enable-thread-safe-client "
 base_configs="$base_configs --with-big-tables $maintainer_mode"
 base_configs="$base_configs --with-plugin-aria --with-aria-tmp-tables"
+# Following is to get tokudb to work
+base_configs="$base_configs --with-jemalloc=NO"
 
 if test -d "$path/../cmd-line-utils/readline"
 then

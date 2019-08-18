@@ -11,7 +11,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA 
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA 
 
 # This file includes Windows specific hacks, mostly around compiler flags
 
@@ -205,9 +205,8 @@ IF(MSVC)
 ENDIF()
 
 # Always link with socket library
-LINK_LIBRARIES(ws2_32)
-# ..also for tests
-SET(CMAKE_REQUIRED_LIBRARIES ws2_32)
+STRING(APPEND CMAKE_C_STANDARD_LIBRARIES " ws2_32.lib")
+STRING(APPEND CMAKE_CXX_STANDARD_LIBRARIES " ws2_32.lib")
 
 # System checks
 SET(SIGNAL_WITH_VIO_CLOSE 1) # Something that runtime team needs

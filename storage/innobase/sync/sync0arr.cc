@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -20,7 +20,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -31,7 +31,6 @@ The wait array used in synchronization primitives
 Created 9/5/1995 Heikki Tuuri
 *******************************************************/
 
-#include "ha_prototypes.h"
 #include "sync0arr.h"
 #include <mysqld_error.h>
 #include <mysql/plugin.h>
@@ -46,13 +45,8 @@ Created 9/5/1995 Heikki Tuuri
 #include <sql_plugin.h>
 #include <innodb_priv.h>
 
-#include "sync0sync.h"
 #include "lock0lock.h"
 #include "sync0rw.h"
-#include "sync0debug.h"
-#include "os0event.h"
-#include "os0file.h"
-#include "srv0srv.h"
 
 /*
 			WAIT ARRAY
@@ -125,8 +119,10 @@ struct sync_cell_t {
 					has not been signalled in the
 					period between the reset and
 					wait call. */
-	time_t		reservation_time;/*!< time when the thread reserved
-					the wait cell */
+	/** time(NULL) when the wait cell was reserved.
+	FIXME: sync_array_print_long_waits_low() may display bogus
+	warnings when the system time is adjusted to the past! */
+	time_t		reservation_time;
 };
 
 /* NOTE: It is allowed for a thread to wait for an event allocated for
@@ -381,7 +377,7 @@ sync_array_reserve_cell(
 
 	cell->thread_id = os_thread_get_curr_id();
 
-	cell->reservation_time = ut_time();
+	cell->reservation_time = time(NULL);
 
 	/* Make sure the event is reset and also store the value of
 	signal_count at which the event was reset. */

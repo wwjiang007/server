@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -27,10 +27,8 @@ Created 2012-08-21 Sunny Bains.
 #ifndef sync0policy_h
 #define sync0policy_h
 
-#include "univ.i"
 #include "ut0rnd.h"
 #include "os0thread.h"
-#include "sync0types.h"
 #include "srv0mon.h"
 
 #ifdef UNIV_DEBUG

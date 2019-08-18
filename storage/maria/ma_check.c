@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* Describe, check and repair of MARIA tables */
 
@@ -916,7 +916,7 @@ static int chk_index(HA_CHECK *param, MARIA_HA *info, MARIA_KEYDEF *keyinfo,
   info->last_key.keyinfo= tmp_key.keyinfo= keyinfo;
   info->lastinx= ~0;                            /* Safety */
   tmp_key.data= tmp_key_buff;
-  for ( ;; )
+  for ( ;; _ma_copy_key(&info->last_key, &tmp_key))
   {
     if (nod_flag)
     {
@@ -998,7 +998,6 @@ static int chk_index(HA_CHECK *param, MARIA_HA *info, MARIA_KEYDEF *keyinfo,
                                             tmp_key.data);
       }
     }
-    _ma_copy_key(&info->last_key, &tmp_key);
     (*key_checksum)+= maria_byte_checksum(tmp_key.data, tmp_key.data_length);
     record= _ma_row_pos_from_key(&tmp_key);
 
@@ -5427,7 +5426,12 @@ int _ma_sort_write_record(MARIA_SORT_PARAM *sort_param)
       info->cur_row.checksum= (*share->calc_check_checksum)(info,
                                                               sort_param->
                                                               record);
-      reclength= _ma_rec_pack(info,from,sort_param->record);
+      if (!(reclength= _ma_rec_pack(info,from,sort_param->record)))
+      {
+        _ma_check_print_error(param,"Got error %d when packing record",
+                              my_errno);
+        DBUG_RETURN(1);
+      }
       flag=0;
 
       do
@@ -5756,7 +5760,7 @@ static int sort_insert_key(MARIA_SORT_PARAM *sort_param,
     a_length= share->keypage_header + nod_flag;
     key_block->end_pos= anc_buff + share->keypage_header;
     bzero(anc_buff, share->keypage_header);
-    _ma_store_keynr(share, anc_buff, sort_param->key);
+    _ma_store_keynr(share, anc_buff, sort_param->keyinfo->key_nr);
     lastkey=0;					/* No previous key in block */
   }
   else
