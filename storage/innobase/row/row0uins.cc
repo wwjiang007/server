@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -95,7 +95,7 @@ row_undo_ins_remove_clust_rec(
 		ut_ad(node->trx->dict_operation_lock_mode
 		      != RW_X_LATCH);
 		ut_ad(node->table->id != DICT_INDEXES_ID);
-		mtr_s_lock(dict_index_get_lock(index), &mtr);
+		mtr_s_lock_index(index, &mtr);
 	}
 
 	success = btr_pcur_restore_position(
@@ -128,7 +128,8 @@ row_undo_ins_remove_clust_rec(
 		ut_ad(node->rec_type == TRX_UNDO_INSERT_REC);
 
 		dict_drop_index_tree(
-			btr_pcur_get_rec(&node->pcur), &(node->pcur), &mtr);
+			btr_pcur_get_rec(&node->pcur), &node->pcur, node->trx,
+			&mtr);
 
 		mtr.commit();
 
@@ -267,20 +268,18 @@ row_undo_ins_remove_sec_low(
 	que_thr_t*	thr)	/*!< in: query thread */
 {
 	btr_pcur_t		pcur;
-	btr_cur_t*		btr_cur;
 	dberr_t			err	= DB_SUCCESS;
 	mtr_t			mtr;
-	enum row_search_result	search_result;
 	const bool		modify_leaf = mode == BTR_MODIFY_LEAF;
 
 	row_mtr_start(&mtr, index, !modify_leaf);
 
 	if (modify_leaf) {
 		mode = BTR_MODIFY_LEAF | BTR_ALREADY_S_LATCHED;
-		mtr_s_lock(dict_index_get_lock(index), &mtr);
+		mtr_s_lock_index(index, &mtr);
 	} else {
 		ut_ad(mode == (BTR_MODIFY_TREE | BTR_LATCH_FOR_DELETE));
-		mtr_sx_lock(dict_index_get_lock(index), &mtr);
+		mtr_sx_lock_index(index, &mtr);
 	}
 
 	if (row_log_online_op_try(index, entry, 0)) {
@@ -295,12 +294,15 @@ row_undo_ins_remove_sec_low(
 		mode |= BTR_RTREE_UNDO_INS;
 	}
 
-	search_result = row_search_index_entry(index, entry, mode,
-					       &pcur, &mtr);
-
-	switch (search_result) {
+	switch (row_search_index_entry(index, entry, mode, &pcur, &mtr)) {
+	case ROW_BUFFERED:
+	case ROW_NOT_DELETED_REF:
+		/* These are invalid outcomes, because the mode passed
+		to row_search_index_entry() did not include any of the
+		flags BTR_INSERT, BTR_DELETE, or BTR_DELETE_MARK. */
+		ut_error;
 	case ROW_NOT_FOUND:
-		goto func_exit;
+		break;
 	case ROW_FOUND:
 		if (dict_index_is_spatial(index)
 		    && rec_get_deleted_flag(
@@ -310,31 +312,22 @@ row_undo_ins_remove_sec_low(
 				<< " is deleted marked on insert rollback.";
 			ut_ad(0);
 		}
-		break;
 
-	case ROW_BUFFERED:
-	case ROW_NOT_DELETED_REF:
-		/* These are invalid outcomes, because the mode passed
-		to row_search_index_entry() did not include any of the
-		flags BTR_INSERT, BTR_DELETE, or BTR_DELETE_MARK. */
-		ut_error;
+		btr_cur_t* btr_cur = btr_pcur_get_btr_cur(&pcur);
+
+		if (modify_leaf) {
+			err = btr_cur_optimistic_delete(btr_cur, 0, &mtr)
+				? DB_SUCCESS : DB_FAIL;
+		} else {
+			/* Passing rollback=false here, because we are
+			deleting a secondary index record: the distinction
+			only matters when deleting a record that contains
+			externally stored columns. */
+			btr_cur_pessimistic_delete(&err, FALSE, btr_cur, 0,
+						   false, &mtr);
+		}
 	}
 
-	btr_cur = btr_pcur_get_btr_cur(&pcur);
-
-	if (modify_leaf) {
-		err = btr_cur_optimistic_delete(btr_cur, 0, &mtr)
-			? DB_SUCCESS : DB_FAIL;
-	} else {
-		/* Passing rollback=false here, because we are
-		deleting a secondary index record: the distinction
-		only matters when deleting a record that contains
-		externally stored columns. */
-		ut_ad(!dict_index_is_clust(index));
-		btr_cur_pessimistic_delete(&err, FALSE, btr_cur, 0,
-					   false, &mtr);
-	}
-func_exit:
 	btr_pcur_close(&pcur);
 func_exit_no_pcur:
 	mtr_commit(&mtr);
@@ -583,6 +576,7 @@ row_undo_ins(
 	switch (node->rec_type) {
 	default:
 		ut_ad(!"wrong undo record type");
+		/* fall through */
 	case TRX_UNDO_INSERT_REC:
 		/* Skip the clustered index (the first index) */
 		node->index = dict_table_get_next_index(node->index);

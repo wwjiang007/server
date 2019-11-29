@@ -46,6 +46,7 @@ SET @old_instant=
 WHERE variable_name = 'innodb_instant_alter_column');
 
 let $format= 3;
+let $redundant_4k= `SELECT @@GLOBAL.innodb_page_size=4096`;
 while ($format) {
 let $engine= `SELECT CONCAT('ENGINE=InnoDB ROW_FORMAT=',CASE $format
 WHEN 1 THEN 'DYNAMIC'
@@ -223,6 +224,13 @@ SELECT id, c2, ST_AsText(c3) c3, c4, c5, c6, c7, c8 FROM t3;
 --enable_info
 ALTER TABLE t3 ADD COLUMN t TEXT CHARSET utf8
 DEFAULT 'The quick brown fox jumps over the lazy dog';
+
+if ($redundant_4k)
+{
+--error ER_TOO_BIG_ROWSIZE
+ALTER TABLE t3 ADD COLUMN b BLOB NOT NULL;
+SET innodb_strict_mode = OFF;
+}
 ALTER TABLE t3 ADD COLUMN b BLOB NOT NULL;
 --error ER_NO_DEFAULT_FOR_FIELD
 INSERT INTO t3 SET id=4;
@@ -236,7 +244,6 @@ INSERT INTO t3 SET id=5, c2=9;
 SELECT id, c2, ST_AsText(c3) c3, c4, c5, c6, c7, c8, phrase, b FROM t3;
 --enable_info
 ALTER TABLE t3 DROP c3, DROP c7;
-SET innodb_strict_mode = OFF;
 --disable_info
 SELECT * FROM t3;
 
@@ -365,7 +372,32 @@ COMMIT;
 --source include/wait_all_purged.inc
 DROP TABLE t1;
 
+#
+# MDEV-20066 Wrong value on instantly added column after DELETE and UPDATE
+#
+
+eval CREATE TABLE t1(a INT PRIMARY KEY) $engine;
+INSERT INTO t1 VALUES (7);
+
+ALTER TABLE t1 ADD COLUMN c INT NOT NULL DEFAULT 0;
+ALTER TABLE t1 ADD INDEX (c);
+
+BEGIN;
+DELETE FROM t1;
+INSERT INTO t1 VALUES (4,0),(7,77);
+COMMIT;
+BEGIN;
+DELETE FROM t1 WHERE a=7;
+UPDATE t1 SET a=7;
+COMMIT;
+SELECT * FROM t1 FORCE INDEX(PRIMARY);
+SELECT * FROM t1 FORCE INDEX(c);
+DELETE FROM t1;
+CHECK TABLE t1;
+DROP TABLE t1;
+
 dec $format;
+let $redundant_4k= 0;
 }
 disconnect analyze;
 SELECT variable_value-@old_instant instants

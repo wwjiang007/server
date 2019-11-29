@@ -657,7 +657,7 @@ void fsp_header_init(fil_space_t* space, ulint size, mtr_t* mtr)
 	const page_id_t		page_id(space->id, 0);
 	const page_size_t	page_size(space->flags);
 
-	mtr_x_lock(&space->latch, mtr);
+	mtr_x_lock_space(space, mtr);
 	buf_block_t* block = buf_page_create(page_id, page_size, mtr);
 	buf_page_get(page_id, page_size, RW_SX_LATCH, mtr);
 	buf_block_dbg_add_level(block, SYNC_FSP_PAGE);
@@ -1426,7 +1426,8 @@ fsp_free_page(
 	const ulint	bit = offset % FSP_EXTENT_SIZE;
 
 	xdes_set_bit(descr, XDES_FREE_BIT, bit, TRUE, mtr);
-	xdes_set_bit(descr, XDES_CLEAN_BIT, bit, TRUE, mtr);
+	/* xdes_init() should have set all XDES_CLEAN_BIT */
+	ut_ad(xdes_get_bit(descr, XDES_CLEAN_BIT, bit));
 
 	frag_n_used = mtr_read_ulint(header + FSP_FRAG_N_USED, MLOG_4BYTES,
 				     mtr);
@@ -1583,9 +1584,7 @@ fsp_alloc_seg_inode_page(
 	fsp_header_t*	space_header,
 	mtr_t*		mtr)
 {
-	fseg_inode_t*	inode;
 	buf_block_t*	block;
-	page_t*		page;
 
 	ut_ad(page_offset(space_header) == FSP_HEADER_OFFSET);
 	ut_ad(page_get_space_id(page_align(space_header)) == space->id);
@@ -1603,22 +1602,20 @@ fsp_alloc_seg_inode_page(
 	buf_block_dbg_add_level(block, SYNC_FSP_PAGE);
 	ut_ad(rw_lock_get_sx_lock_count(&block->lock) == 1);
 
-	page = buf_block_get_frame(block);
-
-	mlog_write_ulint(page + FIL_PAGE_TYPE, FIL_PAGE_INODE,
+	mlog_write_ulint(block->frame + FIL_PAGE_TYPE, FIL_PAGE_INODE,
 			 MLOG_2BYTES, mtr);
 
-	for (ulint i = 0; i < FSP_SEG_INODES_PER_PAGE(page_size); i++) {
-
-		inode = fsp_seg_inode_page_get_nth_inode(
-			page, i, page_size, mtr);
-
-		mlog_write_ull(inode + FSEG_ID, 0, mtr);
+#ifdef UNIV_DEBUG
+	const byte* inode = FSEG_ID + FSEG_ARR_OFFSET + block->frame;
+	for (ulint i = FSP_SEG_INODES_PER_PAGE(page_size); i--;
+	     inode += FSEG_INODE_SIZE) {
+		ut_ad(!mach_read_from_8(inode));
 	}
+#endif
 
 	flst_add_last(
 		space_header + FSP_SEG_INODES_FREE,
-		page + FSEG_INODE_PAGE_NODE, mtr);
+		block->frame + FSEG_INODE_PAGE_NODE, mtr);
 
 	return(true);
 }
@@ -1947,7 +1944,7 @@ fseg_create(
 	ut_ad(byte_offset + FSEG_HEADER_SIZE
 	      <= srv_page_size - FIL_PAGE_DATA_END);
 
-	mtr_x_lock(&space->latch, mtr);
+	mtr_x_lock_space(space, mtr);
 	const page_size_t	page_size(space->flags);
 	ut_d(space->modify_check(*mtr));
 
@@ -2652,7 +2649,7 @@ fsp_reserve_free_extents(
 	ut_ad(mtr);
 	*n_reserved = n_ext;
 
-	mtr_x_lock(&space->latch, mtr);
+	mtr_x_lock_space(space, mtr);
 	const page_size_t	page_size(space->flags);
 
 	space_header = fsp_get_space_header(space, page_size, mtr);
@@ -2817,7 +2814,6 @@ fseg_free_page_low(
 	ulint	state;
 	ib_id_t	descr_id;
 	ib_id_t	seg_id;
-	ulint	i;
 
 	ut_ad(seg_inode != NULL);
 	ut_ad(mtr != NULL);
@@ -2853,7 +2849,7 @@ fseg_free_page_low(
 	if (state != XDES_FSEG) {
 		/* The page is in the fragment pages of the segment */
 
-		for (i = 0;; i++) {
+		for (ulint i = 0;; i++) {
 			if (fseg_get_nth_frag_page_no(seg_inode, i, mtr)
 			    == offset) {
 
@@ -2908,7 +2904,8 @@ fseg_free_page_low(
 	const ulint	bit = offset % FSP_EXTENT_SIZE;
 
 	xdes_set_bit(descr, XDES_FREE_BIT, bit, TRUE, mtr);
-	xdes_set_bit(descr, XDES_CLEAN_BIT, bit, TRUE, mtr);
+	/* xdes_init() should have set all XDES_CLEAN_BIT */
+	ut_ad(xdes_get_bit(descr, XDES_CLEAN_BIT, bit));
 
 	if (xdes_is_free(descr, mtr)) {
 		/* The extent has become free: free it to space */
@@ -2943,7 +2940,7 @@ fseg_free_page_func(
 	DBUG_ENTER("fseg_free_page");
 	fseg_inode_t*		seg_inode;
 	buf_block_t*		iblock;
-	mtr_x_lock(&space->latch, mtr);
+	mtr_x_lock_space(space, mtr);
 	const page_size_t	page_size(space->flags);
 
 	DBUG_LOG("fseg_free_page", "space_id: " << space->id
@@ -2973,7 +2970,7 @@ fseg_page_is_free(fil_space_t* space, unsigned page)
 	page_no_t	dpage = xdes_calc_descriptor_page(page_size, page);
 
 	mtr.start();
-	mtr_s_lock(&space->latch, &mtr);
+	mtr_s_lock_space(space, &mtr);
 
 	if (page >= space->free_limit || page >= space->size_in_header) {
 		is_free = true;
@@ -3014,7 +3011,6 @@ fseg_free_extent(
 	xdes_t*	descr;
 	ulint	not_full_n_used;
 	ulint	descr_n_used;
-	ulint	i;
 
 	ut_ad(mtr != NULL);
 
@@ -3030,7 +3026,7 @@ fseg_free_extent(
 
 #ifdef BTR_CUR_HASH_ADAPT
 	if (ahi) {
-		for (i = 0; i < FSP_EXTENT_SIZE; i++) {
+		for (ulint i = 0; i < FSP_EXTENT_SIZE; i++) {
 			if (!xdes_mtr_get_bit(descr, XDES_FREE_BIT, i, mtr)) {
 
 				/* Drop search system page hash index
@@ -3068,7 +3064,7 @@ fseg_free_extent(
 	fsp_free_extent(space, page, page_size, mtr);
 
 #ifdef UNIV_DEBUG
-	for (i = 0; i < FSP_EXTENT_SIZE; i++) {
+	for (ulint i = 0; i < FSP_EXTENT_SIZE; i++) {
 
 		buf_page_set_file_page_was_freed(
 			page_id_t(space->id, first_page_in_extent + i));

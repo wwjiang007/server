@@ -37,7 +37,9 @@ IF(CMAKE_VERSION VERSION_LESS "3.6.0")
   SET(CPACK_PACKAGE_FILE_NAME "${CPACK_RPM_PACKAGE_NAME}-${VERSION}-${RPM}-${CMAKE_SYSTEM_PROCESSOR}")
 ELSE()
   SET(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
-  SET(CPACK_RPM_DEBUGINFO_PACKAGE ON CACHE INTERNAL "")
+  OPTION(CPACK_RPM_DEBUGINFO_PACKAGE "" ON)
+  MARK_AS_ADVANCED(CPACK_RPM_DEBUGINFO_PACKAGE)
+  SET(CPACK_RPM_BUILD_SOURCE_DIRS_PREFIX "/usr/src/debug/${CPACK_RPM_PACKAGE_NAME}-${VERSION}")
 ENDIF()
 
 SET(CPACK_RPM_PACKAGE_RELEASE "1%{?dist}")
@@ -193,7 +195,7 @@ MACRO(ALTERNATIVE_NAME real alt)
   SET(p "CPACK_RPM_${real}_PACKAGE_PROVIDES")
   SET(${p} "${${p}} ${alt} = ${ver} ${alt}%{?_isa} = ${ver} config(${alt}) = ${ver}")
   SET(o "CPACK_RPM_${real}_PACKAGE_OBSOLETES")
-  SET(${o} "${${o}} ${alt} ${alt}%{?_isa}")
+  SET(${o} "${${o}} ${alt}")
 ENDMACRO(ALTERNATIVE_NAME)
 
 ALTERNATIVE_NAME("devel"  "mysql-devel")
@@ -213,8 +215,9 @@ ELSEIF(RPM MATCHES "fedora" OR RPM MATCHES "(rhel|centos)7")
   ALTERNATIVE_NAME("server" "mariadb-server")
   ALTERNATIVE_NAME("server" "mysql-compat-server")
   ALTERNATIVE_NAME("test"   "mariadb-test")
-ELSEIF(RPM MATCHES "(rhel|centos)8")
-  SET(PYTHON_SHEBANG "/usr/bin/python3")
+ENDIF()
+IF(RPM MATCHES "fedora31" OR RPM MATCHES "(rhel|centos)8")
+  SET(PYTHON_SHEBANG "/usr/bin/python3" CACHE STRING "python shebang")
 ENDIF()
 
 # If we want to build build MariaDB-shared-compat,
@@ -247,6 +250,7 @@ IF(compat53 AND compat101)
 
   STRING(REPLACE "\n" " " compat_provides "${compat_provides}")
   STRING(REPLACE "\n" " " compat_obsoletes "${compat_obsoletes}")
+  STRING(REGEX REPLACE "[^ ]+\\([^ ]+ *" "" compat_obsoletes "${compat_obsoletes}")
   SETA(CPACK_RPM_compat_PACKAGE_PROVIDES "${compat_provides}")
   SETA(CPACK_RPM_compat_PACKAGE_OBSOLETES "${compat_obsoletes}")
 
@@ -269,7 +273,6 @@ IF(CMAKE_VERSION VERSION_GREATER "3.9.99")
 SET(CPACK_SOURCE_GENERATOR "RPM")
 SETA(CPACK_RPM_SOURCE_PKG_BUILD_PARAMS
   "-DRPM=${RPM}"
-  "-DCPACK_RPM_BUILD_SOURCE_DIRS_PREFIX=/usr/src/debug/${CPACK_RPM_PACKAGE_NAME}-${VERSION}"
   )
 
 MACRO(ADDIF var)

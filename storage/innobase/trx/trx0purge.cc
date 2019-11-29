@@ -252,7 +252,7 @@ trx_purge_add_undo_to_history(const trx_t* trx, trx_undo_t*& undo, mtr_t* mtr)
 	/* After the purge thread has been given permission to exit,
 	we may roll back transactions (trx->undo_no==0)
 	in THD::cleanup() invoked from unlink_thd() in fast shutdown,
-	or in trx_rollback_resurrected() in slow shutdown.
+	or in trx_rollback_recovered() in slow shutdown.
 
 	Before any transaction-generating background threads or the
 	purge have been started, recv_recovery_rollback_active() can
@@ -968,7 +968,7 @@ not_found:
 	mtr_t mtr;
 	const ulint size = SRV_UNDO_TABLESPACE_SIZE_IN_PAGES;
 	mtr.start();
-	mtr_x_lock(&space->latch, &mtr);
+	mtr_x_lock_space(space, &mtr);
 	fil_truncate_log(space, size, &mtr);
 	fsp_header_init(space, size, &mtr);
 	mutex_enter(&fil_system.mutex);
@@ -1561,7 +1561,12 @@ trx_purge(
 /*======*/
 	ulint	n_purge_threads,	/*!< in: number of purge tasks
 					to submit to the work queue */
-	bool	truncate)		/*!< in: truncate history if true */
+	bool	truncate		/*!< in: truncate history if true */
+#ifdef UNIV_DEBUG
+	, srv_slot_t *slot		/*!< in/out: purge coordinator
+					thread slot */
+#endif
+)
 {
 	que_thr_t*	thr = NULL;
 	ulint		n_pages_handled;
@@ -1597,6 +1602,7 @@ trx_purge(
 
 	thr = que_fork_scheduler_round_robin(purge_sys.query, thr);
 
+	ut_d(thr->thread_slot = slot);
 	que_run_threads(thr);
 
 	my_atomic_addlint(&purge_sys.n_completed, 1);

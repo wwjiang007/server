@@ -69,17 +69,20 @@ bool compare_record(const TABLE *table)
 {
   DBUG_ASSERT(records_are_comparable(table));
 
-  if ((table->file->ha_table_flags() & HA_PARTIAL_COLUMN_READ) != 0)
+  if (table->file->ha_table_flags() & HA_PARTIAL_COLUMN_READ ||
+      table->s->has_update_default_function)
   {
     /*
       Storage engine may not have read all columns of the record.  Fields
       (including NULL bits) not in the write_set may not have been read and
       can therefore not be compared.
+      Or ON UPDATE DEFAULT NOW() could've changed field values, including
+      NULL bits.
     */ 
     for (Field **ptr= table->field ; *ptr != NULL; ptr++)
     {
       Field *field= *ptr;
-      if (bitmap_is_set(table->write_set, field->field_index))
+      if (field->has_explicit_value() && !field->vcol_info)
       {
         if (field->real_maybe_null())
         {
@@ -111,8 +114,9 @@ bool compare_record(const TABLE *table)
   /* Compare updated fields */
   for (Field **ptr= table->field ; *ptr ; ptr++)
   {
-    if (bitmap_is_set(table->write_set, (*ptr)->field_index) &&
-	(*ptr)->cmp_binary_offset(table->s->rec_buff_length))
+    Field *field= *ptr;
+    if (field->has_explicit_value() && !field->vcol_info &&
+	field->cmp_binary_offset(table->s->rec_buff_length))
       return TRUE;
   }
   return FALSE;
@@ -874,11 +878,6 @@ update_begin:
   THD_STAGE_INFO(thd, stage_updating);
   while (!(error=info.read_record()) && !thd->killed)
   {
-    if (table->versioned() && !table->vers_end_field()->is_max())
-    {
-      continue;
-    }
-
     explain->tracker.on_record_read();
     thd->inc_examined_row_count(1);
     if (!select || select->skip_record(thd) > 0)
@@ -897,11 +896,6 @@ update_begin:
 
       if (!can_compare_record || compare_record(table))
       {
-        if (table->default_field && table->update_default_fields(1, ignore))
-        {
-          error= 1;
-          break;
-        }
         if ((res= table_list->view_check_option(thd, ignore)) !=
             VIEW_CHECK_OK)
         {
@@ -1157,7 +1151,7 @@ update_end:
 
       if (thd->binlog_query(THD::ROW_QUERY_TYPE,
                             thd->query(), thd->query_length(),
-                            transactional_table, FALSE, FALSE, errcode))
+                            transactional_table, FALSE, FALSE, errcode) > 0)
       {
         error=1;				// Rollback update
       }
@@ -1266,6 +1260,15 @@ bool mysql_prepare_update(THD *thd, TABLE_LIST *table_list,
 #endif
 
   thd->lex->allow_sum_func.clear_all();
+
+  DBUG_ASSERT(table_list->table);
+  // conds could be cached from previous SP call
+  DBUG_ASSERT(!table_list->vers_conditions.is_set() ||
+              !*conds || thd->stmt_arena->is_stmt_execute());
+  if (select_lex->vers_setup_conds(thd, table_list))
+    DBUG_RETURN(TRUE);
+
+  *conds= select_lex->where;
 
   /*
     We do not call DT_MERGE_FOR_INSERT because it has no sense for simple
@@ -1786,6 +1789,9 @@ bool mysql_multi_update(THD *thd, TABLE_LIST *table_list, List<Item> *fields,
 
   thd->abort_on_warning= !ignore && thd->is_strict_mode();
   List<Item> total_list;
+
+  if (select_lex->vers_setup_conds(thd, table_list))
+    DBUG_RETURN(1);
 
   res= mysql_select(thd,
                     table_list, select_lex->with_wild, total_list, conds,
@@ -2346,11 +2352,6 @@ int multi_update::send_data(List<Item> &not_used_values)
     if (table->status & (STATUS_NULL_ROW | STATUS_UPDATED))
       continue;
 
-    if (table->versioned() && !table->vers_end_field()->is_max())
-    {
-      continue;
-    }
-
     if (table == table_to_update)
     {
       /*
@@ -2378,10 +2379,6 @@ int multi_update::send_data(List<Item> &not_used_values)
       if (!can_compare_record || compare_record(table))
       {
 	int error;
-
-        if (table->default_field &&
-            unlikely(table->update_default_fields(1, ignore)))
-          DBUG_RETURN(1);
 
         if ((error= cur_table->view_check_option(thd, ignore)) !=
             VIEW_CHECK_OK)
@@ -2699,6 +2696,10 @@ int multi_update::do_updates()
         copy_field_ptr->to_field->set_has_explicit_value();
       }
 
+      table->evaluate_update_default_function();
+      if (table->vfield &&
+          table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_WRITE))
+        goto err2;
       if (table->triggers &&
           table->triggers->process_triggers(thd, TRG_EVENT_UPDATE,
                                             TRG_ACTION_BEFORE, TRUE))
@@ -2707,12 +2708,6 @@ int multi_update::do_updates()
       if (!can_compare_record || compare_record(table))
       {
         int error;
-        if (table->default_field &&
-            (error= table->update_default_fields(1, ignore)))
-          goto err2;
-        if (table->vfield &&
-            table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_WRITE))
-          goto err2;
         if ((error= cur_table->view_check_option(thd, ignore)) !=
             VIEW_CHECK_OK)
         {
@@ -2892,7 +2887,7 @@ bool multi_update::send_eof()
 
       if (thd->binlog_query(THD::ROW_QUERY_TYPE, thd->query(),
                             thd->query_length(), transactional_tables, FALSE,
-                            FALSE, errcode))
+                            FALSE, errcode) > 0)
 	local_error= 1;				// Rollback update
       thd->set_current_stmt_binlog_format(save_binlog_format);
     }

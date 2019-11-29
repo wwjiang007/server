@@ -114,5 +114,4 @@ update t set b=11;
 select count(*) from t for system_time all;
 count(*)
 2
-drop database test;
-create database test;
+drop table t;

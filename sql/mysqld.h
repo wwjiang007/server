@@ -18,6 +18,7 @@
 #define MYSQLD_INCLUDED
 
 #include "sql_basic_types.h"			/* query_id_t */
+#include "sql_mode.h"                           /* Sql_mode_dependency */
 #include "sql_plugin.h"
 #include "sql_bitmap.h"                         /* Bitmap */
 #include "my_decimal.h"                         /* my_decimal */
@@ -188,7 +189,8 @@ enum vers_system_time_t
   SYSTEM_TIME_AS_OF,
   SYSTEM_TIME_FROM_TO,
   SYSTEM_TIME_BETWEEN,
-  SYSTEM_TIME_BEFORE,
+  SYSTEM_TIME_BEFORE,  // used for DELETE HISTORY ... BEFORE
+  SYSTEM_TIME_HISTORY, // used for DELETE HISTORY
   SYSTEM_TIME_ALL
 };
 

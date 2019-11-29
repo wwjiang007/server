@@ -874,8 +874,12 @@ row_ins_foreign_report_add_err(
 	fk_str = dict_print_info_on_foreign_key_in_create_format(trx, foreign,
 							TRUE);
 	fputs(fk_str.c_str(), ef);
-	fprintf(ef, " in parent table, in index %s",
-		foreign->foreign_index->name());
+	if (foreign->foreign_index) {
+		fprintf(ef, " in parent table, in index %s",
+			foreign->foreign_index->name());
+	} else {
+		fputs(" in parent table", ef);
+	}
 	if (entry) {
 		fputs(" tuple:\n", ef);
 		/* TODO: DB_TRX_ID and DB_ROLL_PTR may be uninitialized.
@@ -1656,34 +1660,51 @@ row_ins_check_foreign_constraint(
 	    || !check_table->is_readable()
 	    || check_index == NULL) {
 
-		if (!srv_read_only_mode && check_ref) {
-			FILE*	ef = dict_foreign_err_file;
-			std::string fk_str;
+		FILE*	ef = dict_foreign_err_file;
+		std::string fk_str;
 
-			row_ins_set_detailed(trx, foreign);
+		row_ins_set_detailed(trx, foreign);
+		row_ins_foreign_trx_print(trx);
 
-			row_ins_foreign_trx_print(trx);
-
-			fputs("Foreign key constraint fails for table ", ef);
-			ut_print_name(ef, trx,
-				      foreign->foreign_table_name);
-			fputs(":\n", ef);
-			fk_str = dict_print_info_on_foreign_key_in_create_format(
-				trx, foreign, TRUE);
-			fputs(fk_str.c_str(), ef);
-			fprintf(ef, "\nTrying to add to index %s tuple:\n",
-				foreign->foreign_index->name());
+		fputs("Foreign key constraint fails for table ", ef);
+		ut_print_name(ef, trx, check_ref
+			      ? foreign->foreign_table_name
+			      : foreign->referenced_table_name);
+		fputs(":\n", ef);
+		fk_str = dict_print_info_on_foreign_key_in_create_format(
+			trx, foreign, TRUE);
+		fputs(fk_str.c_str(), ef);
+		if (check_ref) {
+			if (foreign->foreign_index) {
+				fprintf(ef, "\nTrying to add to index %s"
+					" tuple:\n",
+					foreign->foreign_index->name());
+			} else {
+				fputs("\nTrying to add tuple:\n", ef);
+			}
 			dtuple_print(ef, entry);
 			fputs("\nBut the parent table ", ef);
-			ut_print_name(ef, trx,
-				      foreign->referenced_table_name);
-			fputs("\nor its .ibd file does"
+			ut_print_name(ef, trx, foreign->referenced_table_name);
+			fputs("\nor its .ibd file or the required index does"
 			      " not currently exist!\n", ef);
-			mutex_exit(&dict_foreign_err_mutex);
-
 			err = DB_NO_REFERENCED_ROW;
+		} else {
+			if (foreign->referenced_index) {
+				fprintf(ef, "\nTrying to modify index %s"
+					" tuple:\n",
+					foreign->referenced_index->name());
+			} else {
+				fputs("\nTrying to modify tuple:\n", ef);
+			}
+			dtuple_print(ef, entry);
+			fputs("\nBut the referencing table ", ef);
+			ut_print_name(ef, trx, foreign->foreign_table_name);
+			fputs("\nor its .ibd file or the required index does"
+			      " not currently exist!\n", ef);
+			err = DB_ROW_IS_REFERENCED;
 		}
 
+		mutex_exit(&dict_foreign_err_mutex);
 		goto exit_func;
 	}
 
@@ -1965,6 +1986,7 @@ row_ins_check_foreign_constraints(
 /*==============================*/
 	dict_table_t*	table,	/*!< in: table */
 	dict_index_t*	index,	/*!< in: index */
+	bool		pk,	/*!< in: index->is_primary() */
 	dtuple_t*	entry,	/*!< in: index entry for index */
 	que_thr_t*	thr)	/*!< in: query thread */
 {
@@ -1972,6 +1994,8 @@ row_ins_check_foreign_constraints(
 	dberr_t		err;
 	trx_t*		trx;
 	ibool		got_s_lock	= FALSE;
+
+	DBUG_ASSERT(index->is_primary() == pk);
 
 	trx = thr_get_trx(thr);
 
@@ -1984,7 +2008,8 @@ row_ins_check_foreign_constraints(
 
 		foreign = *it;
 
-		if (foreign->foreign_index == index) {
+		if (foreign->foreign_index == index
+		    || (pk && !foreign->foreign_index)) {
 			dict_table_t*	ref_table = NULL;
 			dict_table_t*	referenced_table
 						= foreign->referenced_table;
@@ -2568,10 +2593,7 @@ row_ins_clust_index_entry_low(
 	ulint		n_uniq,	/*!< in: 0 or index->n_uniq */
 	dtuple_t*	entry,	/*!< in/out: index entry to insert */
 	ulint		n_ext,	/*!< in: number of externally stored columns */
-	que_thr_t*	thr,	/*!< in: query thread */
-	bool		dup_chk_only)
-				/*!< in: if true, just do duplicate check
-				and return. don't execute actual insert. */
+	que_thr_t*	thr)	/*!< in: query thread */
 {
 	btr_pcur_t	pcur;
 	btr_cur_t*	cursor;
@@ -2611,7 +2633,7 @@ row_ins_clust_index_entry_low(
 		if (mode == BTR_MODIFY_LEAF
 		    && dict_index_is_online_ddl(index)) {
 			mode = BTR_MODIFY_LEAF_ALREADY_S_LATCHED;
-			mtr_s_lock(dict_index_get_lock(index), &mtr);
+			mtr_s_lock_index(index, &mtr);
 		}
 
 		if (unsigned ai = index->table->persistent_autoinc) {
@@ -2660,7 +2682,6 @@ row_ins_clust_index_entry_low(
 		ut_ad(flags == BTR_NO_LOCKING_FLAG);
 		ut_ad(index->is_instant());
 		ut_ad(!dict_index_is_online_ddl(index));
-		ut_ad(!dup_chk_only);
 
 		const rec_t* rec = btr_cur_get_rec(cursor);
 
@@ -2724,11 +2745,6 @@ err_exit:
 			mtr_commit(&mtr);
 			goto func_exit;
 		}
-	}
-
-	if (dup_chk_only) {
-		mtr_commit(&mtr);
-		goto func_exit;
 	}
 
 	/* Note: Allowing duplicates would qualify for modification of
@@ -2850,9 +2866,9 @@ row_ins_sec_mtr_start_and_check_if_aborted(
 	}
 
 	if (search_mode & BTR_ALREADY_S_LATCHED) {
-		mtr_s_lock(dict_index_get_lock(index), mtr);
+		mtr_s_lock_index(index, mtr);
 	} else {
-		mtr_sx_lock(dict_index_get_lock(index), mtr);
+		mtr_sx_lock_index(index, mtr);
 	}
 
 	switch (index->online_status) {
@@ -2892,10 +2908,7 @@ row_ins_sec_index_entry_low(
 	dtuple_t*	entry,	/*!< in/out: index entry to insert */
 	trx_id_t	trx_id,	/*!< in: PAGE_MAX_TRX_ID during
 				row_log_table_apply(), or 0 */
-	que_thr_t*	thr,	/*!< in: query thread */
-	bool		dup_chk_only)
-				/*!< in: if true, just do duplicate check
-				and return. don't execute actual insert. */
+	que_thr_t*	thr)	/*!< in: query thread */
 {
 	DBUG_ENTER("row_ins_sec_index_entry_low");
 
@@ -2941,9 +2954,9 @@ row_ins_sec_index_entry_low(
 		DEBUG_SYNC_C("row_ins_sec_index_enter");
 		if (mode == BTR_MODIFY_LEAF) {
 			search_mode |= BTR_ALREADY_S_LATCHED;
-			mtr_s_lock(dict_index_get_lock(index), &mtr);
+			mtr_s_lock_index(index, &mtr);
 		} else {
-			mtr_sx_lock(dict_index_get_lock(index), &mtr);
+			mtr_sx_lock_index(index, &mtr);
 		}
 
 		if (row_log_online_op_try(
@@ -3092,10 +3105,6 @@ row_ins_sec_index_entry_low(
 			&cursor, 0, __FILE__, __LINE__, &mtr);
 	}
 
-	if (dup_chk_only) {
-		goto func_exit;
-	}
-
 	if (row_ins_must_modify_rec(&cursor)) {
 		/* There is already an index entry with a long enough common
 		prefix, we must convert the insert into a modify of an
@@ -3184,10 +3193,7 @@ row_ins_clust_index_entry(
 	dict_index_t*	index,	/*!< in: clustered index */
 	dtuple_t*	entry,	/*!< in/out: index entry to insert */
 	que_thr_t*	thr,	/*!< in: query thread */
-	ulint		n_ext,	/*!< in: number of externally stored columns */
-	bool		dup_chk_only)
-				/*!< in: if true, just do duplicate check
-				and return. don't execute actual insert. */
+	ulint		n_ext)	/*!< in: number of externally stored columns */
 {
 	dberr_t	err;
 	ulint	n_uniq;
@@ -3196,7 +3202,7 @@ row_ins_clust_index_entry(
 
 	if (!index->table->foreign_set.empty()) {
 		err = row_ins_check_foreign_constraints(
-			index->table, index, entry, thr);
+			index->table, index, true, entry, thr);
 		if (err != DB_SUCCESS) {
 
 			DBUG_RETURN(err);
@@ -3226,7 +3232,7 @@ row_ins_clust_index_entry(
 
 	err = row_ins_clust_index_entry_low(
 		flags, BTR_MODIFY_LEAF, index, n_uniq, entry,
-		n_ext, thr, dup_chk_only);
+		n_ext, thr);
 
 	entry->n_fields = orig_n_fields;
 
@@ -3243,7 +3249,7 @@ row_ins_clust_index_entry(
 
 	err = row_ins_clust_index_entry_low(
 		flags, BTR_MODIFY_TREE, index, n_uniq, entry,
-		n_ext, thr, dup_chk_only);
+		n_ext, thr);
 
 	entry->n_fields = orig_n_fields;
 
@@ -3262,9 +3268,8 @@ row_ins_sec_index_entry(
 	dict_index_t*	index,	/*!< in: secondary index */
 	dtuple_t*	entry,	/*!< in/out: index entry to insert */
 	que_thr_t*	thr,	/*!< in: query thread */
-	bool		dup_chk_only)
-				/*!< in: if true, just do duplicate check
-				and return. don't execute actual insert. */
+	bool		check_foreign) /*!< in: true if check
+				foreign table is needed, false otherwise */
 {
 	dberr_t		err;
 	mem_heap_t*	offsets_heap;
@@ -3275,9 +3280,9 @@ row_ins_sec_index_entry(
 			DBUG_SET("-d,row_ins_sec_index_entry_timeout");
 			return(DB_LOCK_WAIT);});
 
-	if (!index->table->foreign_set.empty()) {
+	if (check_foreign && !index->table->foreign_set.empty()) {
 		err = row_ins_check_foreign_constraints(index->table, index,
-							entry, thr);
+							false, entry, thr);
 		if (err != DB_SUCCESS) {
 
 			return(err);
@@ -3307,7 +3312,7 @@ row_ins_sec_index_entry(
 
 	err = row_ins_sec_index_entry_low(
 		flags, BTR_MODIFY_LEAF, index, offsets_heap, heap, entry,
-		trx_id, thr, dup_chk_only);
+		trx_id, thr);
 	if (err == DB_FAIL) {
 		mem_heap_empty(heap);
 
@@ -3321,8 +3326,7 @@ row_ins_sec_index_entry(
 
 		err = row_ins_sec_index_entry_low(
 			flags, BTR_MODIFY_TREE, index,
-			offsets_heap, heap, entry, 0, thr,
-			dup_chk_only);
+			offsets_heap, heap, entry, 0, thr);
 	}
 
 	mem_heap_free(heap);
@@ -3351,9 +3355,9 @@ row_ins_index_entry(
 			return(DB_LOCK_WAIT);});
 
 	if (index->is_primary()) {
-		return(row_ins_clust_index_entry(index, entry, thr, 0, false));
+		return row_ins_clust_index_entry(index, entry, thr, 0);
 	} else {
-		return(row_ins_sec_index_entry(index, entry, thr, false));
+		return row_ins_sec_index_entry(index, entry, thr);
 	}
 }
 

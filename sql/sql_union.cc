@@ -976,9 +976,21 @@ bool st_select_lex_unit::prepare(TABLE_LIST *derived_arg,
       if (sl->tvc->prepare(thd, sl, tmp_result, this))
 	goto err;
     }
-    else if (prepare_join(thd, first_sl, tmp_result, additional_options,
+    else
+    {
+      if (prepare_join(thd, first_sl, tmp_result, additional_options,
                      is_union_select))
-      goto err;
+        goto err;
+
+      if (derived_arg && derived_arg->table &&
+          derived_arg->derived_type == VIEW_ALGORITHM_MERGE &&
+          derived_arg->table->versioned())
+      {
+        /* Got versioning conditions (see vers_setup_conds()), need to update
+           derived_arg. */
+        derived_arg->where= first_sl->where;
+      }
+    }
     types= first_sl->item_list;
     goto cont;
   }
@@ -1858,6 +1870,7 @@ bool st_select_lex_unit::cleanup()
       DBUG_RETURN(FALSE);
     }
   }
+  columns_are_renamed= false;
   cleaned= 1;
 
   for (SELECT_LEX *sl= first_select(); sl; sl= sl->next_select())

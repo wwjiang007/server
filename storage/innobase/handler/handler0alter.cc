@@ -2135,7 +2135,7 @@ innobase_col_to_mysql(
 	case DATA_SYS:
 		/* These column types should never be shipped to MySQL. */
 		ut_ad(0);
-
+		/* fall through */
 	case DATA_FLOAT:
 	case DATA_DOUBLE:
 	case DATA_DECIMAL:
@@ -4278,10 +4278,17 @@ innobase_add_instant_try(
 			case MYSQL_TYPE_MEDIUM_BLOB:
 			case MYSQL_TYPE_BLOB:
 			case MYSQL_TYPE_LONG_BLOB:
+			variable_length:
 				/* Store the empty string for 'core'
 				variable-length NOT NULL columns. */
 				dfield_set_data(d, field_ref_zero, 0);
 				break;
+			case MYSQL_TYPE_STRING:
+				if (col->mbminlen != col->mbmaxlen
+				    && dict_table_is_comp(user_table)) {
+					goto variable_length;
+				}
+				/* fall through */
 			default:
 				/* For fixed-length NOT NULL 'core' columns,
 				get a dummy default value from SQL. Note that
@@ -4450,7 +4457,7 @@ empty_table:
 		index->set_modified(mtr);
 		err = row_ins_clust_index_entry_low(
 			BTR_NO_LOCKING_FLAG, BTR_MODIFY_TREE, index,
-			index->n_uniq, entry, 0, thr, false);
+			index->n_uniq, entry, 0, thr);
 	} else {
 err_exit:
 		err = DB_CORRUPTION;
@@ -4921,6 +4928,10 @@ prepare_inplace_alter_table_dict(
 
 	new_clustered = (DICT_CLUSTERED & index_defs[0].ind_type) != 0;
 
+	create_table_info_t info(ctx->prebuilt->trx->mysql_thd, altered_table,
+				 ha_alter_info->create_info, NULL, NULL,
+				 srv_file_per_table);
+
 	/* The primary index would be rebuilt if a FTS Doc ID
 	column is to be added, and the primary index definition
 	is just copied from old table and stored in indexdefs[0] */
@@ -5299,9 +5310,8 @@ new_clustered_failed:
 
 		for (uint a = 0; a < ctx->num_to_add_index; a++) {
 			ctx->add_index[a]->table = ctx->new_table;
-			ctx->add_index[a] = dict_index_add_to_cache(
-				ctx->add_index[a], FIL_NULL, false,
-				&error, add_v);
+			error = dict_index_add_to_cache(
+				ctx->add_index[a], FIL_NULL, add_v);
 			ut_a(error == DB_SUCCESS);
 		}
 		DBUG_ASSERT(ha_alter_info->key_count
@@ -5540,6 +5550,10 @@ new_table_failed:
 			}
 
 			ctx->add_index[a] = index;
+			if (!info.row_size_is_acceptable(*index)) {
+				error = DB_TOO_BIG_RECORD;
+				goto error_handling;
+			}
 			index->parser = index_defs[a].parser;
 			index->has_new_v_col = has_new_v_col;
 			/* Note the id of the transaction that created this
@@ -5638,6 +5652,10 @@ error_handling_drop_uncached:
 				DBUG_ASSERT(index != ctx->add_index[a]);
 			}
 			ctx->add_index[a]= index;
+			if (!info.row_size_is_acceptable(*index)) {
+				error = DB_TOO_BIG_RECORD;
+				goto error_handling_drop_uncached;
+			}
 
 			index->parser = index_defs[a].parser;
 			index->has_new_v_col = has_new_v_col;
@@ -5686,6 +5704,10 @@ error_handling_drop_uncached:
 				}
 			}
 		}
+	} else if (ctx->is_instant()
+		   && !info.row_size_is_acceptable(*user_table)) {
+		error = DB_TOO_BIG_RECORD;
+		goto error_handling;
 	}
 
 	if (ctx->online && ctx->num_to_add_index) {
@@ -5751,15 +5773,13 @@ op_ok:
 				goto error_handling;
 			}
 
-			ctx->new_table->fts->fts_status
-				|= TABLE_DICT_LOCKED;
+			ctx->new_table->fts->dict_locked = true;
 
 			error = innobase_fts_load_stopword(
 				ctx->new_table, ctx->trx,
 				ctx->prebuilt->trx->mysql_thd)
 				? DB_SUCCESS : DB_ERROR;
-			ctx->new_table->fts->fts_status
-				&= ulint(~TABLE_DICT_LOCKED);
+			ctx->new_table->fts->dict_locked = false;
 
 			if (error != DB_SUCCESS) {
 				goto error_handling;
@@ -7430,27 +7450,23 @@ innobase_drop_foreign_try(
 }
 
 /** Rename a column in the data dictionary tables.
-@param[in] user_table		InnoDB table that was being altered
-@param[in] trx			Data dictionary transaction
+@param[in] ctx			ALTER TABLE context
+@param[in,out] trx		Data dictionary transaction
 @param[in] table_name		Table name in MySQL
 @param[in] nth_col		0-based index of the column
 @param[in] from			old column name
 @param[in] to			new column name
-@param[in] new_clustered	whether the table has been rebuilt
-@param[in] evict_fk_cache	Evict the fk info from cache
 @retval true Failure
 @retval false Success */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 innobase_rename_column_try(
-	const dict_table_t*	user_table,
-	trx_t*			trx,
-	const char*		table_name,
-	ulint			nth_col,
-	const char*		from,
-	const char*		to,
-	bool			new_clustered,
-	bool			evict_fk_cache)
+	const ha_innobase_inplace_ctx&	ctx,
+	trx_t*				trx,
+	const char*			table_name,
+	ulint				nth_col,
+	const char*			from,
+	const char*			to)
 {
 	pars_info_t*	info;
 	dberr_t		error;
@@ -7462,13 +7478,13 @@ innobase_rename_column_try(
 	ut_ad(mutex_own(&dict_sys->mutex));
 	ut_ad(rw_lock_own(&dict_operation_lock, RW_LOCK_X));
 
-	if (new_clustered) {
+	if (ctx.need_rebuild()) {
 		goto rename_foreign;
 	}
 
 	info = pars_info_create();
 
-	pars_info_add_ull_literal(info, "tableid", user_table->id);
+	pars_info_add_ull_literal(info, "tableid", ctx.old_table->id);
 	pars_info_add_int4_literal(info, "nth", nth_col);
 	pars_info_add_str_literal(info, "new", to);
 
@@ -7498,7 +7514,7 @@ err_exit:
 	trx->op_info = "renaming column in SYS_FIELDS";
 
 	for (const dict_index_t* index = dict_table_get_first_index(
-		     user_table);
+		     ctx.old_table);
 	     index != NULL;
 	     index = dict_table_get_next_index(index)) {
 
@@ -7551,8 +7567,8 @@ rename_foreign:
 	std::set<dict_foreign_t*> fk_evict;
 	bool		foreign_modified;
 
-	for (dict_foreign_set::const_iterator it = user_table->foreign_set.begin();
-	     it != user_table->foreign_set.end();
+	for (dict_foreign_set::const_iterator it = ctx.old_table->foreign_set.begin();
+	     it != ctx.old_table->foreign_set.end();
 	     ++it) {
 
 		dict_foreign_t*	foreign = *it;
@@ -7562,6 +7578,14 @@ rename_foreign:
 			if (my_strcasecmp(system_charset_info,
 					  foreign->foreign_col_names[i],
 					  from)) {
+				continue;
+			}
+
+			/* Ignore the foreign key rename if fk info
+			is being dropped. */
+			if (innobase_dropping_foreign(
+				    foreign, ctx.drop_fk,
+				    ctx.num_to_drop_fk)) {
 				continue;
 			}
 
@@ -7593,8 +7617,8 @@ rename_foreign:
 	}
 
 	for (dict_foreign_set::const_iterator it
-		= user_table->referenced_set.begin();
-	     it != user_table->referenced_set.end();
+		= ctx.old_table->referenced_set.begin();
+	     it != ctx.old_table->referenced_set.end();
 	     ++it) {
 
 		foreign_modified = false;
@@ -7635,7 +7659,7 @@ rename_foreign:
 	}
 
 	/* Reload the foreign key info for instant table too. */
-	if (new_clustered || evict_fk_cache) {
+	if (ctx.need_rebuild() || ctx.is_instant()) {
 		std::for_each(fk_evict.begin(), fk_evict.end(),
 			      dict_foreign_remove_from_cache);
 	}
@@ -7686,12 +7710,10 @@ innobase_rename_columns_try(
 						: i - num_v;
 
 				if (innobase_rename_column_try(
-					    ctx->old_table, trx, table_name,
+					    *ctx, trx, table_name,
 					    col_n,
 					    cf->field->field_name.str,
-					    cf->field_name.str,
-					    ctx->need_rebuild(),
-					    ctx->is_instant())) {
+					    cf->field_name.str)) {
 					return(true);
 				}
 				goto processed_field;
@@ -8214,7 +8236,7 @@ innobase_update_foreign_cache(
 	also be loaded. */
 	while (err == DB_SUCCESS && !fk_tables.empty()) {
 		dict_table_t*	table = dict_load_table(
-			fk_tables.front(), true, DICT_ERR_IGNORE_NONE);
+			fk_tables.front(), DICT_ERR_IGNORE_NONE);
 
 		if (table == NULL) {
 			err = DB_TABLE_NOT_FOUND;
@@ -8924,6 +8946,7 @@ commit_cache_norebuild(
 					    || (index->type
 						& DICT_CORRUPT));
 				DBUG_ASSERT(index->table->fts);
+				DEBUG_SYNC_C("norebuild_fts_drop");
 				fts_drop_index(index->table, index, trx);
 			}
 
