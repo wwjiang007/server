@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2019, MariaDB
+   Copyright (c) 2010, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -113,6 +113,14 @@ int yylex(void *yylval, void *yythd);
 #else
 #define YYDEBUG 0
 #endif
+
+
+static Item* escape(THD *thd)
+{
+  thd->lex->escape_used= false;
+  const char *esc= thd->variables.sql_mode & MODE_NO_BACKSLASH_ESCAPES ? "" : "\\";
+  return new (thd->mem_root) Item_string_ascii(thd, esc, MY_TEST(esc[0]));
+}
 
 
 /**
@@ -278,10 +286,9 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %parse-param { THD *thd }
 %lex-param { THD *thd }
 /*
-  Currently there are 55 shift/reduce conflicts.
-  We should not introduce new conflicts any more.
+  We should not introduce any further shift/reduce conflicts.
 */
-%expect 54
+%expect 70
 
 /*
    Comments for TOKENS.
@@ -1058,16 +1065,6 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %token  <kwd>  XML_SYM
 %token  <kwd>  YEAR_SYM                      /* SQL-2003-R */
 
-
-/*
-  Give ESCAPE (in LIKE) a very low precedence.
-  This allows the concatenation operator || to be used on the right
-  side of "LIKE" with sql_mode=PIPES_AS_CONCAT (without ORACLE):
-    SELECT 'ab' LIKE 'a'||'b'||'c';
-*/
-%left   PREC_BELOW_ESCAPE
-%left   ESCAPE_SYM
-
 /* A dummy token to force the priority of table_ref production in a join. */
 %left   CONDITIONLESS_JOIN
 %left   JOIN_SYM INNER_SYM STRAIGHT_JOIN CROSS LEFT RIGHT ON_SYM USING
@@ -1077,10 +1074,12 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %left   AND_SYM AND_AND_SYM
 
 %left   PREC_BELOW_NOT
-%left   NOT_SYM
 
-%left   BETWEEN_SYM CASE_SYM WHEN_SYM THEN_SYM ELSE
-%left   '=' EQUAL_SYM GE '>' LE '<' NE IS LIKE SOUNDS_SYM REGEXP IN_SYM
+%nonassoc NOT_SYM
+%left   '=' EQUAL_SYM GE '>' LE '<' NE
+%nonassoc IS
+%right BETWEEN_SYM
+%left   LIKE SOUNDS_SYM REGEXP IN_SYM
 %left   '|'
 %left   '&'
 %left   SHIFT_LEFT SHIFT_RIGHT
@@ -1088,8 +1087,8 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %left   '*' '/' '%' DIV_SYM MOD_SYM
 %left   '^'
 %left   MYSQL_CONCAT_SYM
-%left   NEG '~' NOT2_SYM BINARY
-%left   COLLATE_SYM
+%nonassoc NEG '~' NOT2_SYM BINARY
+%nonassoc COLLATE_SYM
 
 /*
   Tokens that can change their meaning from identifier to something else
@@ -1260,6 +1259,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %type <type_handler> int_type real_type
 
 %type <Lex_field_type> type_with_opt_collate field_type
+        qualified_field_type
         sp_param_type_with_opt_collate
         sp_param_field_type
         sp_param_field_type_string
@@ -1339,7 +1339,6 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
         select_sublist_qualified_asterisk
         expr_or_default set_expr_or_default
         geometry_function signed_literal expr_or_literal
-        opt_escape
         sp_opt_default
         simple_ident_nospvar
         field_or_var limit_option
@@ -4204,9 +4203,10 @@ sp_fetch_list:
             LEX *lex= Lex;
             sp_head *sp= lex->sphead;
             sp_pcontext *spc= lex->spcont;
-            sp_variable *spv;
-
-            if (unlikely(!spc || !(spv = spc->find_variable(&$1, false))))
+            sp_variable *spv= likely(spc != NULL)
+              ? spc->find_variable(&$1, false)
+              : NULL;
+            if (unlikely(!spv))
               my_yyabort_error((ER_SP_UNDECLARED_VAR, MYF(0), $1.str));
 
             /* An SP local variable */
@@ -4218,9 +4218,10 @@ sp_fetch_list:
             LEX *lex= Lex;
             sp_head *sp= lex->sphead;
             sp_pcontext *spc= lex->spcont;
-            sp_variable *spv;
-
-            if (unlikely(!spc || !(spv = spc->find_variable(&$3, false))))
+            sp_variable *spv= likely(spc != NULL)
+              ? spc->find_variable(&$3, false)
+              : NULL;
+            if (unlikely(!spv))
               my_yyabort_error((ER_SP_UNDECLARED_VAR, MYF(0), $3.str));
 
             /* An SP local variable */
@@ -4463,7 +4464,7 @@ sp_labeled_block:
           {
             Lex->sp_block_init(thd, &$1);
           }
-          sp_decl_body_list
+          opt_sp_decl_body_list
           {
             if (unlikely(Lex->sp_block_with_exceptions_finalize_declarations(thd)))
               MYSQL_YYABORT;
@@ -4505,7 +4506,7 @@ sp_unlabeled_block:
               MYSQL_YYABORT;
             Lex->sp_block_init(thd);
           }
-          sp_decl_body_list
+          opt_sp_decl_body_list
           {
             if (unlikely(Lex->sp_block_with_exceptions_finalize_declarations(thd)))
               MYSQL_YYABORT;
@@ -6573,10 +6574,12 @@ field_spec:
 
             lex->init_last_field(f, &$1, NULL);
             $<create_field>$= f;
+            lex->parsing_options.lookup_keywords_after_qualifier= true;
           }
           field_type_or_serial opt_check_constraint
           {
             LEX *lex=Lex;
+            lex->parsing_options.lookup_keywords_after_qualifier= false;
             $$= $<create_field>2;
 
             $$->check_constraint= $4;
@@ -6595,7 +6598,7 @@ field_spec:
         ;
 
 field_type_or_serial:
-          field_type  { Lex->last_field->set_attributes($1, Lex->charset); }
+          qualified_field_type  { Lex->last_field->set_attributes($1, Lex->charset); }
           field_def
         | SERIAL_SYM
           {
@@ -6757,6 +6760,18 @@ column_default_expr:
         | expr_or_literal
           {
             if (unlikely(!($$= add_virtual_expression(thd, $1))))
+              MYSQL_YYABORT;
+          }
+        ;
+
+qualified_field_type:
+          field_type
+          {
+            Lex->map_data_type(Lex_ident_sys(), &($$= $1));
+          }
+        | sp_decl_ident '.' field_type
+          {
+            if (Lex->map_data_type($1, &($$= $3)))
               MYSQL_YYABORT;
           }
         ;
@@ -6934,7 +6949,7 @@ field_type_temporal:
             }
             $$.set(&type_handler_year, $2);
           }
-        | DATE_SYM { $$.set(thd->type_handler_for_date()); }
+        | DATE_SYM { $$.set(&type_handler_newdate); }
         | TIME_SYM opt_field_length
           {
             $$.set(opt_mysql56_temporal_format ?
@@ -6944,31 +6959,14 @@ field_type_temporal:
           }
         | TIMESTAMP opt_field_length
           {
-            if (thd->variables.sql_mode & MODE_MAXDB)
-              $$.set(opt_mysql56_temporal_format ?
-                     static_cast<const Type_handler*>(&type_handler_datetime2) :
-                     static_cast<const Type_handler*>(&type_handler_datetime),
-                     $2);
-            else
-            {
-              /* 
-                Unlike other types TIMESTAMP fields are NOT NULL by default.
-                Unless --explicit-defaults-for-timestamp is given.
-              */
-              if (!opt_explicit_defaults_for_timestamp)
-                Lex->last_field->flags|= NOT_NULL_FLAG;
-              $$.set(opt_mysql56_temporal_format ?
-                     static_cast<const Type_handler*>(&type_handler_timestamp2):
-                     static_cast<const Type_handler*>(&type_handler_timestamp),
-                     $2);
-            }
+            $$.set(opt_mysql56_temporal_format ?
+                   static_cast<const Type_handler*>(&type_handler_timestamp2):
+                   static_cast<const Type_handler*>(&type_handler_timestamp),
+                   $2);
           }
         | DATETIME opt_field_length
           {
-            $$.set(opt_mysql56_temporal_format ?
-                   static_cast<const Type_handler*>(&type_handler_datetime2) :
-                   static_cast<const Type_handler*>(&type_handler_datetime),
-                   $2);
+            $$.set(thd->type_handler_for_datetime(), $2);
           }
         ;
 
@@ -7324,27 +7322,28 @@ with_or_without_system:
 type_with_opt_collate:
         field_type opt_collate
         {
-          $$= $1;
+          Lex->map_data_type(Lex_ident_sys(), &($$= $1));
 
           if ($2)
           {
             if (unlikely(!(Lex->charset= merge_charset_and_collation(Lex->charset, $2))))
               MYSQL_YYABORT;
           }
-          Lex->last_field->set_attributes($1, Lex->charset);
+          Lex->last_field->set_attributes($$, Lex->charset);
         }
         ;
 
 sp_param_type_with_opt_collate:
         sp_param_field_type opt_collate
         {
-          $$= $1;
+          Lex->map_data_type(Lex_ident_sys(), &($$= $1));
+            
           if ($2)
           {
             if (unlikely(!(Lex->charset= merge_charset_and_collation(Lex->charset, $2))))
               MYSQL_YYABORT;
           }
-          Lex->last_field->set_attributes($1, Lex->charset);
+          Lex->last_field->set_attributes($$, Lex->charset);
         }
         ;
 
@@ -7970,10 +7969,10 @@ alter:
             lex->server_options.reset($3);
           } OPTIONS_SYM '(' server_options_list ')' { }
           /* ALTER USER foo is allowed for MySQL compatibility. */
-        | ALTER opt_if_exists USER_SYM clear_privileges grant_list
+        | ALTER USER_SYM opt_if_exists clear_privileges grant_list
           opt_require_clause opt_resource_options
           {
-            Lex->create_info.set($2);
+            Lex->create_info.set($3);
             Lex->sql_command= SQLCOM_ALTER_USER;
           }
         | ALTER SEQUENCE_SYM opt_if_exists
@@ -8388,6 +8387,8 @@ alter_list_item:
           }
         | ALTER opt_column opt_if_exists_table_element field_ident SET DEFAULT column_default_expr
           {
+            if (check_expression($7, &$4, VCOL_DEFAULT))
+              MYSQL_YYABORT;
             if (unlikely(Lex->add_alter_list($4.str, $7, $3)))
               MYSQL_YYABORT;
           }
@@ -8468,8 +8469,8 @@ opt_index_lock_algorithm:
 alter_algorithm_option:
           ALGORITHM_SYM opt_equal DEFAULT
           {
-            Lex->alter_info.requested_algorithm=
-              Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT;
+            Lex->alter_info.set_requested_algorithm(
+              Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT);
           }
         | ALGORITHM_SYM opt_equal ident
           {
@@ -9732,59 +9733,59 @@ expr:
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri IS TRUE_SYM %prec IS
+        | expr IS TRUE_SYM %prec IS
           {
             $$= new (thd->mem_root) Item_func_istrue(thd, $1);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri IS not TRUE_SYM %prec IS
+        | expr IS not TRUE_SYM %prec IS
           {
             $$= new (thd->mem_root) Item_func_isnottrue(thd, $1);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri IS FALSE_SYM %prec IS
+        | expr IS FALSE_SYM %prec IS
           {
             $$= new (thd->mem_root) Item_func_isfalse(thd, $1);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri IS not FALSE_SYM %prec IS
+        | expr IS not FALSE_SYM %prec IS
           {
             $$= new (thd->mem_root) Item_func_isnotfalse(thd, $1);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri IS UNKNOWN_SYM %prec IS
+        | expr IS UNKNOWN_SYM %prec IS
           {
             $$= new (thd->mem_root) Item_func_isnull(thd, $1);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri IS not UNKNOWN_SYM %prec IS
+        | expr IS not UNKNOWN_SYM %prec IS
           {
             $$= new (thd->mem_root) Item_func_isnotnull(thd, $1);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri %prec PREC_BELOW_NOT
+        | expr IS NULL_SYM %prec PREC_BELOW_NOT
+          {
+            $$= new (thd->mem_root) Item_func_isnull(thd, $1);
+            if (unlikely($$ == NULL))
+              MYSQL_YYABORT;
+          }
+        | expr IS not NULL_SYM %prec IS
+          {
+            $$= new (thd->mem_root) Item_func_isnotnull(thd, $1);
+            if (unlikely($$ == NULL))
+              MYSQL_YYABORT;
+          }
+        | bool_pri
         ;
 
 bool_pri:
-          bool_pri IS NULL_SYM %prec IS
-          {
-            $$= new (thd->mem_root) Item_func_isnull(thd, $1);
-            if (unlikely($$ == NULL))
-              MYSQL_YYABORT;
-          }
-        | bool_pri IS not NULL_SYM %prec IS
-          {
-            $$= new (thd->mem_root) Item_func_isnotnull(thd, $1);
-            if (unlikely($$ == NULL))
-              MYSQL_YYABORT;
-          }
-        | bool_pri EQUAL_SYM predicate %prec EQUAL_SYM
+          bool_pri EQUAL_SYM predicate %prec EQUAL_SYM
           {
             $$= new (thd->mem_root) Item_func_equal(thd, $1, $3);
             if (unlikely($$ == NULL))
@@ -9806,13 +9807,13 @@ bool_pri:
         ;
 
 predicate:
-          bit_expr IN_SYM '(' subselect ')'
+          predicate IN_SYM '(' subselect ')'
           {
             $$= new (thd->mem_root) Item_in_subselect(thd, $1, $4);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr not IN_SYM '(' subselect ')'
+        | predicate not IN_SYM '(' subselect ')'
           {
             Item *item= new (thd->mem_root) Item_in_subselect(thd, $1, $5);
             if (unlikely(item == NULL))
@@ -9821,27 +9822,27 @@ predicate:
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr IN_SYM '(' expr ')'
+        | predicate IN_SYM '(' expr ')'
           {
             $$= handle_sql2003_note184_exception(thd, $1, true, $4);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr IN_SYM '(' expr ',' expr_list ')'
-          { 
+        | predicate IN_SYM '(' expr ',' expr_list ')'
+          {
             $6->push_front($4, thd->mem_root);
             $6->push_front($1, thd->mem_root);
             $$= new (thd->mem_root) Item_func_in(thd, *$6);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr not IN_SYM '(' expr ')'
+        | predicate not IN_SYM '(' expr ')'
           {
             $$= handle_sql2003_note184_exception(thd, $1, false, $5);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr not IN_SYM '(' expr ',' expr_list ')'
+        | predicate not IN_SYM '(' expr ',' expr_list ')'
           {
             $7->push_front($5, thd->mem_root);
             $7->push_front($1, thd->mem_root);
@@ -9850,13 +9851,13 @@ predicate:
               MYSQL_YYABORT;
             $$= item->neg_transformer(thd);
           }
-        | bit_expr BETWEEN_SYM bit_expr AND_SYM predicate
+        | predicate BETWEEN_SYM predicate AND_SYM predicate %prec BETWEEN_SYM
           {
             $$= new (thd->mem_root) Item_func_between(thd, $1, $3, $5);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr not BETWEEN_SYM bit_expr AND_SYM predicate
+        | predicate not BETWEEN_SYM predicate AND_SYM predicate %prec BETWEEN_SYM
           {
             Item_func_between *item;
             item= new (thd->mem_root) Item_func_between(thd, $1, $4, $6);
@@ -9864,7 +9865,7 @@ predicate:
               MYSQL_YYABORT;
             $$= item->neg_transformer(thd);
           }
-        | bit_expr SOUNDS_SYM LIKE bit_expr
+        | predicate SOUNDS_SYM LIKE predicate
           {
             Item *item1= new (thd->mem_root) Item_func_soundex(thd, $1);
             Item *item4= new (thd->mem_root) Item_func_soundex(thd, $4);
@@ -9874,28 +9875,41 @@ predicate:
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr LIKE bit_expr opt_escape
+        | predicate LIKE predicate
           {
-            $$= new (thd->mem_root) Item_func_like(thd, $1, $3, $4,
-                                                   Lex->escape_used);
-            if (unlikely($$ == NULL))
+            $$= new (thd->mem_root) Item_func_like(thd, $1, $3, escape(thd), false);
+            if (unlikely(!$$))
               MYSQL_YYABORT;
           }
-        | bit_expr not LIKE bit_expr opt_escape
+        | predicate LIKE predicate ESCAPE_SYM predicate %prec LIKE
           {
-            Item *item= new (thd->mem_root) Item_func_like(thd, $1, $4, $5,
-                                                             Lex->escape_used);
-            if (unlikely(item == NULL))
+            Lex->escape_used= true;
+            $$= new (thd->mem_root) Item_func_like(thd, $1, $3, $5, true);
+            if (unlikely(!$$))
+              MYSQL_YYABORT;
+          }
+        | predicate not LIKE predicate
+          {
+            Item *item= new (thd->mem_root) Item_func_like(thd, $1, $4, escape(thd), false);
+            if (unlikely(!item))
               MYSQL_YYABORT;
             $$= item->neg_transformer(thd);
           }
-        | bit_expr REGEXP bit_expr
+        | predicate not LIKE predicate ESCAPE_SYM predicate %prec LIKE
+          {
+            Lex->escape_used= true;
+            Item *item= new (thd->mem_root) Item_func_like(thd, $1, $4, $6, true);
+            if (unlikely(!item))
+              MYSQL_YYABORT;
+            $$= item->neg_transformer(thd);
+          }
+        | predicate REGEXP predicate
           {
             $$= new (thd->mem_root) Item_func_regex(thd, $1, $3);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bit_expr not REGEXP bit_expr
+        | predicate not REGEXP predicate
           {
             Item *item= new (thd->mem_root) Item_func_regex(thd, $1, $4);
             if (unlikely(item == NULL))
@@ -12498,23 +12512,6 @@ opt_having_clause:
           }
         ;
 
-opt_escape:
-          ESCAPE_SYM simple_expr 
-          {
-            Lex->escape_used= TRUE;
-            $$= $2;
-          }
-        | /* empty */        %prec PREC_BELOW_ESCAPE
-          {
-            Lex->escape_used= FALSE;
-            $$= ((thd->variables.sql_mode & MODE_NO_BACKSLASH_ESCAPES) ?
-                 new (thd->mem_root) Item_string_ascii(thd, "", 0) :
-                 new (thd->mem_root) Item_string_ascii(thd, "\\", 1));
-            if (unlikely($$ == NULL))
-              MYSQL_YYABORT;
-          }
-        ;
-
 /*
    group by statement in select
 */
@@ -13634,13 +13631,13 @@ expr_or_default:
           expr { $$= $1;}
         | DEFAULT
           {
-            $$= new (thd->mem_root) Item_default_value(thd, Lex->current_context());
+            $$= new (thd->mem_root) Item_default_specification(thd);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
         | IGNORE_SYM
           {
-            $$= new (thd->mem_root) Item_ignore_value(thd, Lex->current_context());
+            $$= new (thd->mem_root) Item_ignore_specification(thd);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }

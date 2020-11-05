@@ -68,8 +68,8 @@ public:
 	PCSZ    sep;
 	char    colname[65], fmt[129], buf[16];
 	uint   *length;
-	int     i, n, bf, ncol, lvl;
-	bool    all;
+	int     i, n, bf, ncol, lvl, sz;
+	bool    all, strfy;
 }; // end of JSONDISC
 
 /***********************************************************************/
@@ -104,7 +104,6 @@ public:
 	PCSZ  Xcol;                   /* Name of expandable column           */
   int   Limit;                  /* Limit of multiple values            */
   int   Pretty;                 /* Depends on file structure           */
-  int   Level;                  /* Used for catalog table              */
   int   Base;                   /* The array index base                */
   bool  Strict;                 /* Strict syntax checking              */
 	char  Sep;                    /* The Jpath separator                 */

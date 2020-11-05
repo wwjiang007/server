@@ -184,10 +184,10 @@ static bool check_fields(THD *thd, List<Item> &items, bool update_view)
   return FALSE;
 }
 
-static bool check_has_vers_fields(TABLE *table, List<Item> &items)
+bool TABLE::vers_check_update(List<Item> &items)
 {
   List_iterator<Item> it(items);
-  if (!table->versioned())
+  if (!versioned_write())
     return false;
 
   while (Item *item= it++)
@@ -195,8 +195,11 @@ static bool check_has_vers_fields(TABLE *table, List<Item> &items)
     if (Item_field *item_field= item->field_for_view_update())
     {
       Field *field= item_field->field;
-      if (field->table == table && !field->vers_update_unversioned())
+      if (field->table == this && !field->vers_update_unversioned())
+      {
+        no_cache= true;
         return true;
+      }
     }
   }
   return false;
@@ -415,7 +418,7 @@ int mysql_update(THD *thd,
   {
     DBUG_RETURN(1);
   }
-  bool has_vers_fields= check_has_vers_fields(table, fields);
+  bool has_vers_fields= table->vers_check_update(fields);
   if (check_key_in_view(thd, table_list))
   {
     my_error(ER_NON_UPDATABLE_TABLE, MYF(0), table_list->alias.str, "UPDATE");
@@ -474,6 +477,8 @@ int mysql_update(THD *thd,
     query_plan.set_no_partitions();
     if (thd->lex->describe || thd->lex->analyze_stmt)
       goto produce_explain_and_leave;
+    if (thd->is_error())
+      DBUG_RETURN(1);
 
     my_ok(thd);				// No matching records
     DBUG_RETURN(0);
@@ -1263,7 +1268,7 @@ bool mysql_prepare_update(THD *thd, TABLE_LIST *table_list,
 
   DBUG_ASSERT(table_list->table);
   // conds could be cached from previous SP call
-  DBUG_ASSERT(!table_list->vers_conditions.is_set() ||
+  DBUG_ASSERT(!table_list->vers_conditions.need_setup() ||
               !*conds || thd->stmt_arena->is_stmt_execute());
   if (select_lex->vers_setup_conds(thd, table_list))
     DBUG_RETURN(TRUE);
@@ -1278,8 +1283,7 @@ bool mysql_prepare_update(THD *thd, TABLE_LIST *table_list,
     DBUG_RETURN(TRUE);
 
   if (setup_tables_and_check_access(thd, &select_lex->context, 
-                                    &select_lex->top_join_list,
-                                    table_list,
+                                    &select_lex->top_join_list, table_list,
                                     select_lex->leaf_tables,
                                     FALSE, UPDATE_ACL, SELECT_ACL, TRUE) ||
       setup_conds(thd, table_list, select_lex->leaf_tables, conds) ||
@@ -2133,7 +2137,7 @@ multi_update::initialize_tables(JOIN *join)
       if (safe_update_on_fly(thd, join->join_tab, table_ref, all_tables))
       {
 	table_to_update= table;			// Update table on the fly
-        has_vers_fields= check_has_vers_fields(table, *fields);
+        has_vers_fields= table->vers_check_update(*fields);
 	continue;
       }
     }
@@ -2464,6 +2468,9 @@ int multi_update::send_data(List<Item> &not_used_values)
       TABLE *tmp_table= tmp_tables[offset];
       if (copy_funcs(tmp_table_param[offset].items_to_copy, thd))
         DBUG_RETURN(1);
+      /* rowid field is NULL if join tmp table has null row from outer join */
+      if (tmp_table->field[0]->is_null())
+        continue;
       /* Store regular updated fields in the row. */
       DBUG_ASSERT(1 + unupdated_check_opt_tables.elements ==
                   tmp_table_param[offset].func_count);
@@ -2609,7 +2616,7 @@ int multi_update::do_updates()
     if (table->vfield)
       empty_record(table);
 
-    has_vers_fields= check_has_vers_fields(table, *fields);
+    has_vers_fields= table->vers_check_update(*fields);
 
     check_opt_it.rewind();
     while(TABLE *tbl= check_opt_it++)
@@ -2668,6 +2675,7 @@ int multi_update::do_updates()
       uint field_num= 0;
       do
       {
+        DBUG_ASSERT(!tmp_table->field[field_num]->is_null());
         if (unlikely((local_error=
                       tbl->file->ha_rnd_pos(tbl->record[0],
                                             (uchar *) tmp_table->

@@ -1333,7 +1333,7 @@ int ha_tokudb::open_main_dictionary(
             NULL,
             DB_BTREE,
             open_flags,
-            0);
+            S_IWUSR);
     if (error) {
         goto exit;
     }
@@ -1396,7 +1396,7 @@ int ha_tokudb::open_secondary_dictionary(
     }
 
 
-    error = (*ptr)->open(*ptr, txn, newname, NULL, DB_BTREE, open_flags, 0);
+    error = (*ptr)->open(*ptr, txn, newname, NULL, DB_BTREE, open_flags, S_IWUSR);
     if (error) {
         my_errno = error;
         goto cleanup;
@@ -6123,6 +6123,11 @@ void ha_tokudb::position(const uchar * record) {
         //
         memcpy(ref, &key.size, sizeof(uint32_t));
     }
+    /*
+      tokudb doesn't always write the last byte. Don't that cause problems with
+      MariaDB
+    */
+    MEM_MAKE_DEFINED(ref, ref_length);
     TOKUDB_HANDLER_DBUG_VOID_RETURN;
 }
 

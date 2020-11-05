@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -76,7 +76,7 @@ dberr_t
 row_undo_mod_clust_low(
 /*===================*/
 	undo_node_t*	node,	/*!< in: row undo node */
-	ulint**		offsets,/*!< out: rec_get_offsets() on the record */
+	rec_offs**	offsets,/*!< out: rec_get_offsets() on the record */
 	mem_heap_t**	offsets_heap,
 				/*!< in/out: memory heap that can be emptied */
 	mem_heap_t*	heap,	/*!< in/out: memory heap */
@@ -159,11 +159,11 @@ static ulint row_trx_id_offset(const rec_t* rec, const dict_index_t* index)
 	if (!trx_id_offset) {
 		/* Reserve enough offsets for the PRIMARY KEY and 2 columns
 		so that we can access DB_TRX_ID, DB_ROLL_PTR. */
-		ulint	offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
+		rec_offs offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
 		rec_offs_init(offsets_);
 		mem_heap_t* heap = NULL;
 		const ulint trx_id_pos = index->n_uniq ? index->n_uniq : 1;
-		ulint* offsets = rec_get_offsets(rec, index, offsets_, true,
+		rec_offs* offsets = rec_get_offsets(rec, index, offsets_, true,
 						 trx_id_pos + 1, &heap);
 		ut_ad(!heap);
 		ulint len;
@@ -186,6 +186,7 @@ static bool row_undo_mod_must_purge(undo_node_t* node, mtr_t* mtr)
 
 	btr_cur_t* btr_cur = btr_pcur_get_btr_cur(&node->pcur);
 	ut_ad(btr_cur->index->is_primary());
+	DEBUG_SYNC_C("rollback_purge_clust");
 
 	mtr->s_lock(&purge_sys.latch, __FILE__, __LINE__);
 
@@ -233,6 +234,7 @@ row_undo_mod_clust(
 		mtr.set_log_mode(MTR_LOG_NO_REDO);
 	} else {
 		index->set_modified(mtr);
+		ut_ad(lock_table_has_locks(index->table));
 	}
 
 	online = dict_index_is_online_ddl(index);
@@ -243,7 +245,7 @@ row_undo_mod_clust(
 
 	mem_heap_t*	heap		= mem_heap_create(1024);
 	mem_heap_t*	offsets_heap	= NULL;
-	ulint*		offsets		= NULL;
+	rec_offs*	offsets		= NULL;
 	const dtuple_t*	rebuilt_old_pk;
 	byte		sys[DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN];
 
@@ -319,6 +321,7 @@ row_undo_mod_clust(
 	      == node->new_trx_id);
 
 	btr_pcur_commit_specify_mtr(pcur, &mtr);
+	DEBUG_SYNC_C("rollback_undo_pk");
 
 	if (err != DB_SUCCESS) {
 		goto func_exit;
@@ -403,7 +406,7 @@ row_undo_mod_clust(
 		ut_ad(index->n_uniq <= MAX_REF_PARTS);
 		/* Reserve enough offsets for the PRIMARY KEY and 2 columns
 		so that we can access DB_TRX_ID, DB_ROLL_PTR. */
-		ulint	offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
+		rec_offs offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
 		rec_offs_init(offsets_);
 		offsets = rec_get_offsets(
 			rec, index, offsets_, true, trx_id_pos + 2, &heap);
@@ -696,7 +699,7 @@ try_again:
 	switch (search_result) {
 		mem_heap_t*	heap;
 		mem_heap_t*	offsets_heap;
-		ulint*		offsets;
+		rec_offs*	offsets;
 	case ROW_BUFFERED:
 	case ROW_NOT_DELETED_REF:
 		/* These are invalid outcomes, because the mode passed
@@ -911,7 +914,7 @@ row_undo_mod_upd_del_sec(
 			does not exist.  However, this situation may
 			only occur during the rollback of incomplete
 			transactions. */
-			ut_a(thr_is_recv(thr));
+			ut_a(thr_get_trx(thr) == trx_roll_crash_recv_trx);
 		} else {
 			err = row_undo_mod_del_mark_or_remove_sec(
 				node, thr, index, entry);
@@ -1348,8 +1351,8 @@ rollback_clust:
 			already be holding dict_sys->mutex, which
 			would be acquired when updating statistics. */
 			if (update_statistics && !dict_locked) {
-				dict_stats_update_if_needed(
-					node->table, node->trx->mysql_thd);
+				dict_stats_update_if_needed(node->table,
+							    *node->trx);
 			} else {
 				node->table->stat_modified_counter++;
 			}

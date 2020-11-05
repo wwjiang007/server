@@ -1,5 +1,8 @@
 --source include/have_wsrep.inc
 --source include/force_restart.inc
+--source include/have_innodb.inc
+
+call mtr.add_suppression("WSREP: Initial position was provided by configuration or SST, avoiding override");
 
 SET @wsrep_provider_options_saved= @@global.wsrep_provider_options;
 SET @wsrep_cluster_address_saved= @@global.wsrep_cluster_address;
@@ -33,13 +36,6 @@ eval SET GLOBAL wsrep_provider= '$WSREP_PROVIDER';
 --let $galera_version=25.3.24
 source include/check_galera_version.inc;
 --enable_query_log
-
---replace_column 2 #
-SHOW GLOBAL STATUS LIKE 'wsrep%';
-
---echo
---replace_column 2 #
-SHOW GLOBAL STATUS LIKE 'wsrep_%';
 
 --replace_column 2 #
 SHOW GLOBAL STATUS LIKE 'wsrep_local_state_comment';
@@ -80,6 +76,7 @@ eval SET GLOBAL wsrep_provider= '$WSREP_PROVIDER';
 SELECT @@global.wsrep_provider;
 SELECT @@global.wsrep_slave_threads;
 SELECT @@global.wsrep_cluster_address;
+SELECT @@global.wsrep_on;
 SHOW STATUS LIKE 'threads_connected';
 SHOW STATUS LIKE 'wsrep_thread_count';
 --echo
@@ -91,6 +88,7 @@ eval SET GLOBAL wsrep_provider= '$WSREP_PROVIDER';
 --replace_regex /.*libgalera_smm.*/libgalera_smm.so/
 SELECT @@global.wsrep_provider;
 SELECT @@global.wsrep_cluster_address;
+SELECT @@global.wsrep_on;
 SHOW STATUS LIKE 'threads_connected';
 SHOW STATUS LIKE 'wsrep_thread_count';
 --echo
@@ -113,6 +111,7 @@ SELECT VARIABLE_VALUE AS EXPECT_2 FROM INFORMATION_SCHEMA.GLOBAL_STATUS WHERE VA
 --replace_regex /.*libgalera_smm.*/libgalera_smm.so/
 SELECT @@global.wsrep_provider;
 SELECT @@global.wsrep_cluster_address;
+SELECT @@global.wsrep_on;
 SHOW STATUS LIKE 'threads_connected';
 SHOW STATUS LIKE 'wsrep_thread_count';
 --echo
@@ -135,6 +134,7 @@ SHOW STATUS LIKE 'threads_connected';
 #
 set wsrep_on=0;
 set wsrep_on=1;
+--source include/wait_until_connected_again.inc
 create user test@localhost;
 connect con1,localhost,test;
 set auto_increment_increment=10;
@@ -157,10 +157,14 @@ SELECT @@global.wsrep_sst_auth;
 SET @@global.wsrep_sst_auth= @wsrep_sst_auth_saved;
 
 # Reset (for mtr internal checks)
+--disable_query_log
 SET GLOBAL wsrep_slave_threads= @wsrep_slave_threads_saved;
-SET GLOBAL wsrep_provider= none;
+eval SET GLOBAL wsrep_provider= '$WSREP_PROVIDER';
 SET GLOBAL wsrep_cluster_address= @wsrep_cluster_address_saved;
 SET GLOBAL wsrep_provider_options= @wsrep_provider_options_saved;
+--enable_query_log
+
+--source include/galera_wait_ready.inc
 
 --echo # End of test.
 

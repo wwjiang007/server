@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -44,7 +44,6 @@ Created 1/8/1996 Heikki Tuuri
 #include "fts0fts.h"
 #include "buf0buf.h"
 #include "gis0type.h"
-#include "os0once.h"
 #include "fil0fil.h"
 #include "fil0crypt.h"
 #include <set>
@@ -296,20 +295,23 @@ parent table will fail, and user has to drop excessive foreign constraint
 before proceeds. */
 #define FK_MAX_CASCADE_DEL		15
 
-/**********************************************************************//**
-Creates a table memory object.
+/** Create a table memory object.
+@param name     table name
+@param space    tablespace
+@param n_cols   total number of columns (both virtual and non-virtual)
+@param n_v_cols number of virtual columns
+@param flags    table flags
+@param flags2   table flags2
 @return own: table object */
 dict_table_t*
 dict_mem_table_create(
-/*==================*/
-	const char*	name,		/*!< in: table name */
-	fil_space_t*	space,		/*!< in: tablespace */
-	ulint		n_cols,		/*!< in: total number of columns
-					including virtual and non-virtual
-					columns */
-	ulint		n_v_cols,	/*!< in: number of virtual columns */
-	ulint		flags,		/*!< in: table flags */
-	ulint		flags2);	/*!< in: table flags2 */
+	const char*	name,
+	fil_space_t*	space,
+	ulint		n_cols,
+	ulint		n_v_cols,
+	ulint		flags,
+	ulint		flags2);
+
 /****************************************************************//**
 Free a table memory object. */
 void
@@ -574,71 +576,72 @@ struct dict_col_t{
 					3072 (REC_VERSION_56_MAX_INDEX_COL_LEN)
 					bytes. */
 
-	/** Detach the column from an index.
-	@param[in]	index	index to be detached from */
-	inline void detach(const dict_index_t& index);
+  /** Detach a virtual column from an index.
+  @param index  being-freed index */
+  inline void detach(const dict_index_t &index);
 
-	/** Data for instantly added columns */
-	struct def_t {
-		/** original default value of instantly added column */
-		const void*	data;
-		/** len of data, or UNIV_SQL_DEFAULT if unavailable */
-		ulint		len;
-	} def_val;
+  /** Data for instantly added columns */
+  struct def_t
+  {
+    /** original default value of instantly added column */
+    const void *data;
+    /** len of data, or UNIV_SQL_DEFAULT if unavailable */
+    ulint len;
+  } def_val;
 
-	/** Retrieve the column name.
-	@param[in]	table	the table of this column */
-	const char* name(const dict_table_t& table) const;
+  /** Retrieve the column name.
+  @param[in]	table	the table of this column */
+  const char *name(const dict_table_t &table) const;
 
-	/** @return whether this is a virtual column */
-	bool is_virtual() const { return prtype & DATA_VIRTUAL; }
-	/** @return whether NULL is an allowed value for this column */
-	bool is_nullable() const { return !(prtype & DATA_NOT_NULL); }
+  /** @return whether this is a virtual column */
+  bool is_virtual() const { return prtype & DATA_VIRTUAL; }
+  /** @return whether NULL is an allowed value for this column */
+  bool is_nullable() const { return !(prtype & DATA_NOT_NULL); }
 
-	/** @return whether table of this system field is TRX_ID-based */
-	bool vers_native() const
-	{
-		ut_ad(vers_sys_start() || vers_sys_end());
-		ut_ad(mtype == DATA_INT || mtype == DATA_FIXBINARY);
-		return mtype == DATA_INT;
-	}
-	/** @return whether this is system versioned */
-	bool is_versioned() const { return !(~prtype & DATA_VERSIONED); }
-	/** @return whether this is the system version start */
-	bool vers_sys_start() const
-	{
-		return (prtype & DATA_VERSIONED) == DATA_VERS_START;
-	}
-	/** @return whether this is the system version end */
-	bool vers_sys_end() const
-	{
-		return (prtype & DATA_VERSIONED) == DATA_VERS_END;
-	}
+  /** @return whether table of this system field is TRX_ID-based */
+  bool vers_native() const
+  {
+    ut_ad(vers_sys_start() || vers_sys_end());
+    ut_ad(mtype == DATA_INT || mtype == DATA_FIXBINARY);
+    return mtype == DATA_INT;
+  }
+  /** @return whether this is system versioned */
+  bool is_versioned() const { return !(~prtype & DATA_VERSIONED); }
+  /** @return whether this is the system version start */
+  bool vers_sys_start() const
+  {
+    return (prtype & DATA_VERSIONED) == DATA_VERS_START;
+  }
+  /** @return whether this is the system version end */
+  bool vers_sys_end() const
+  {
+    return (prtype & DATA_VERSIONED) == DATA_VERS_END;
+  }
 
-	/** @return whether this is an instantly-added column */
-	bool is_instant() const
-	{
-		DBUG_ASSERT(def_val.len != UNIV_SQL_DEFAULT || !def_val.data);
-		return def_val.len != UNIV_SQL_DEFAULT;
-	}
-	/** Get the default value of an instantly-added column.
-	@param[out]	len	value length (in bytes), or UNIV_SQL_NULL
-	@return	default value
-	@retval	NULL	if the default value is SQL NULL (len=UNIV_SQL_NULL) */
-	const byte* instant_value(ulint* len) const
-	{
-		DBUG_ASSERT(is_instant());
-		*len = def_val.len;
-		return static_cast<const byte*>(def_val.data);
-	}
+  /** @return whether this is an instantly-added column */
+  bool is_instant() const
+  {
+    DBUG_ASSERT(def_val.len != UNIV_SQL_DEFAULT || !def_val.data);
+    return def_val.len != UNIV_SQL_DEFAULT;
+  }
+  /** Get the default value of an instantly-added column.
+  @param[out] len   value length (in bytes), or UNIV_SQL_NULL
+  @return default value
+  @retval NULL if the default value is SQL NULL (len=UNIV_SQL_NULL) */
+  const byte *instant_value(ulint *len) const
+  {
+    DBUG_ASSERT(is_instant());
+    *len= def_val.len;
+    return static_cast<const byte*>(def_val.data);
+  }
 
-	/** Remove the 'instant ADD' status of the column */
-	void remove_instant()
-	{
-		DBUG_ASSERT(is_instant());
-		def_val.len = UNIV_SQL_DEFAULT;
-		def_val.data = NULL;
-	}
+  /** Remove the 'instant ADD' status of the column */
+  void remove_instant()
+  {
+    DBUG_ASSERT(is_instant());
+    def_val.len= UNIV_SQL_DEFAULT;
+    def_val.data= NULL;
+  }
 };
 
 /** Index information put in a list of virtual column structure. Index
@@ -811,7 +814,7 @@ extern ulong	zip_pad_max;
 an uncompressed page should be left as padding to avoid compression
 failures. This estimate is based on a self-adapting heuristic. */
 struct zip_pad_info_t {
-	SysMutex*	mutex;	/*!< mutex protecting the info */
+	mysql_mutex_t	mutex;	/*!< mutex protecting the info */
 	ulint		pad;	/*!< number of bytes used as pad */
 	ulint		success;/*!< successful compression ops during
 				current round */
@@ -819,9 +822,6 @@ struct zip_pad_info_t {
 				current round */
 	ulint		n_rounds;/*!< number of currently successful
 				rounds */
-	volatile os_once::state_t
-			mutex_created;
-				/*!< Creation state of mutex member */
 };
 
 /** Number of samples of data size kept when page compression fails for
@@ -832,10 +832,6 @@ a certain index.*/
 system clustered index when there is no primary key. */
 const char innobase_index_reserve_name[] = "GEN_CLUST_INDEX";
 
-/* Estimated number of offsets in records (based on columns)
-to start with. */
-#define OFFS_IN_REC_NORMAL_SIZE		100
-
 /** Data structure for an index.  Most fields will be
 initialized to 0, NULL or FALSE in dict_mem_index_create(). */
 struct dict_index_t{
@@ -843,7 +839,10 @@ struct dict_index_t{
 	mem_heap_t*	heap;	/*!< memory heap */
 	id_name_t	name;	/*!< index name */
 	dict_table_t*	table;	/*!< back pointer to table */
-	unsigned	page:32;/*!< index tree root page number */
+	/** root page number, or FIL_NULL if the index has been detached
+	from storage (DISCARD TABLESPACE or similar),
+	or 1 if the index is in table->freed_indexes */
+	unsigned	page:32;
 	unsigned	merge_threshold:6;
 				/*!< In the pessimistic delete, if the page
 				data size drops below this limit in percent,
@@ -987,7 +986,8 @@ struct dict_index_t{
 				/* in which slot the next sample should be
 				saved. */
 	/* @} */
-	rtr_ssn_t	rtr_ssn;/*!< Node sequence number for RTree */
+	/** R-tree split sequence number */
+	volatile int32	rtr_ssn;
 	rtr_info_track_t*
 			rtr_track;/*!< tracking all R-Tree search cursors */
 	trx_id_t	trx_id; /*!< id of the transaction that created this
@@ -995,7 +995,7 @@ struct dict_index_t{
 				when InnoDB was started up */
 	zip_pad_info_t	zip_pad;/*!< Information about state of
 				compression failures and successes */
-	rw_lock_t	lock;	/*!< read-write lock protecting the
+	mutable rw_lock_t	lock;	/*!< read-write lock protecting the
 				upper levels of the index tree */
 
 	/** Determine if the index has been committed to the
@@ -1040,23 +1040,50 @@ struct dict_index_t{
 	/** @return whether this is a spatial index */
 	bool is_spatial() const { return UNIV_UNLIKELY(type & DICT_SPATIAL); }
 
+	/** @return whether this is the change buffer */
+	bool is_ibuf() const { return UNIV_UNLIKELY(type & DICT_IBUF); }
+
 	/** @return whether the index includes virtual columns */
 	bool has_virtual() const { return type & DICT_VIRTUAL; }
+
+	/** @return the position of DB_TRX_ID */
+	uint16_t db_trx_id() const {
+		DBUG_ASSERT(is_primary());
+		DBUG_ASSERT(n_uniq);
+		return n_uniq;
+	}
+	/** @return the position of DB_ROLL_PTR */
+	uint16_t db_roll_ptr() const
+	{
+		return static_cast<uint16_t>(db_trx_id() + 1);
+	}
+
+	/** @return the offset of the metadata BLOB field,
+	or the first user field after the PRIMARY KEY,DB_TRX_ID,DB_ROLL_PTR */
+	uint16_t first_user_field() const
+	{
+		return static_cast<uint16_t>(db_trx_id() + 2);
+	}
 
 	/** @return whether the index is corrupted */
 	inline bool is_corrupted() const;
 
-	/** Detach the columns from the index that is to be freed. */
-	void detach_columns()
-	{
-		if (has_virtual()) {
-			for (unsigned i = 0; i < n_fields; i++) {
-				fields[i].col->detach(*this);
-			}
-
-			n_fields = 0;
-		}
-	}
+  /** Detach the virtual columns from the index that is to be removed.
+  @param   whether to reset fields[].col */
+  void detach_columns(bool clear= false)
+  {
+    if (!has_virtual())
+      return;
+    for (unsigned i= 0; i < n_fields; i++)
+    {
+      dict_col_t* col= fields[i].col;
+      if (!col || !col->is_virtual())
+        continue;
+      col->detach(*this);
+      if (clear)
+        fields[i].col= NULL;
+    }
+  }
 
 	/** Determine how many fields of a given prefix can be set NULL.
 	@param[in]	n_prefix	number of fields in the prefix
@@ -1112,7 +1139,7 @@ struct dict_index_t{
 	@param[in]	offsets	offsets
 	@return true if row is historical */
 	bool
-	vers_history_row(const rec_t* rec, const ulint* offsets);
+	vers_history_row(const rec_t* rec, const rec_offs* offsets);
 
 	/** Check if record in secondary index is historical row.
 	@param[in]	rec	record in a secondary index
@@ -1120,6 +1147,20 @@ struct dict_index_t{
 	@return true on error */
 	bool
 	vers_history_row(const rec_t* rec, bool &history_row);
+
+#ifdef BTR_CUR_HASH_ADAPT
+  /** @return a clone of this */
+  dict_index_t* clone() const;
+  /** Clone this index for lazy dropping of the adaptive hash index.
+  @return this or a clone */
+  dict_index_t* clone_if_needed();
+  /** @return number of leaf pages pointed to by the adaptive hash index */
+  inline ulint n_ahi_pages() const;
+  /** @return whether mark_freed() had been invoked */
+  bool freed() const { return UNIV_UNLIKELY(page == 1); }
+  /** Note that the index is waiting for btr_search_lazy_free() */
+  void set_freed() { ut_ad(!freed()); page= 1; }
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	/** This ad-hoc class is used by record_size_info only.	*/
 	class record_size_info_t {
@@ -1182,24 +1223,24 @@ struct dict_index_t{
 	inline record_size_info_t record_size_info() const;
 };
 
-/** Detach a column from an index.
-@param[in]	index	index to be detached from */
-inline void dict_col_t::detach(const dict_index_t& index)
+/** Detach a virtual column from an index.
+@param index  being-freed index */
+inline void dict_col_t::detach(const dict_index_t &index)
 {
-	if (!is_virtual()) {
-		return;
-	}
+  ut_ad(is_virtual());
 
-	if (dict_v_idx_list* v_indexes = reinterpret_cast<const dict_v_col_t*>
-	    (this)->v_indexes) {
-		for (dict_v_idx_list::iterator i = v_indexes->begin();
-		     i != v_indexes->end(); i++) {
-			if (i->index == &index) {
-				v_indexes->erase(i);
-				return;
-			}
-		}
-	}
+  if (dict_v_idx_list *v_indexes= reinterpret_cast<const dict_v_col_t*>(this)
+      ->v_indexes)
+  {
+    for (dict_v_idx_list::iterator i= v_indexes->begin();
+         i != v_indexes->end(); i++)
+    {
+      if (i->index == &index) {
+        v_indexes->erase(i);
+        return;
+      }
+    }
+  }
 }
 
 /** The status of online index creation */
@@ -1265,6 +1306,10 @@ struct dict_foreign_t{
 
 	dict_vcol_set*	v_cols;		/*!< set of virtual columns affected
 					by foreign key constraint. */
+
+	/** Check whether the fulltext index gets affected by
+	foreign key constraint */
+	bool affects_fulltext() const;
 };
 
 std::ostream&
@@ -1607,10 +1652,14 @@ struct dict_table_t {
 	/** Add the table definition to the data dictionary cache */
 	void add_to_cache();
 
+	/** @return whether the table is versioned.
+	It is assumed that both vers_start and vers_end set to 0
+	iff table is not versioned. In any other case,
+	these fields correspond to actual positions in cols[]. */
 	bool versioned() const { return vers_start || vers_end; }
 	bool versioned_by_id() const
 	{
-		return vers_start && cols[vers_start].mtype == DATA_INT;
+		return versioned() && cols[vers_start].mtype == DATA_INT;
 	}
 
 	void inc_fk_checks()
@@ -1767,6 +1816,11 @@ struct dict_table_t {
 
 	/** List of indexes of the table. */
 	UT_LIST_BASE_NODE_T(dict_index_t)	indexes;
+#ifdef BTR_CUR_HASH_ADAPT
+	/** List of detached indexes that are waiting to be freed along with
+	the last adaptive hash index entry */
+	UT_LIST_BASE_NODE_T(dict_index_t)	freed_indexes;
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	/** List of foreign key constraints in the table. These refer to
 	columns in other tables. */
@@ -1806,23 +1860,8 @@ struct dict_table_t {
 	/*!< set of foreign key constraints which refer to this table */
 	dict_foreign_set			referenced_set;
 
-	/** Statistics for query optimization. @{ */
-
-	/** Creation state of 'stats_latch'. */
-	volatile os_once::state_t		stats_latch_created;
-
-	/** This latch protects:
-	dict_table_t::stat_initialized,
-	dict_table_t::stat_n_rows (*),
-	dict_table_t::stat_clustered_index_size,
-	dict_table_t::stat_sum_of_other_index_sizes,
-	dict_table_t::stat_modified_counter (*),
-	dict_table_t::indexes*::stat_n_diff_key_vals[],
-	dict_table_t::indexes*::stat_index_size,
-	dict_table_t::indexes*::stat_n_leaf_pages.
-	(*) Those are not always protected for
-	performance reasons. */
-	rw_lock_t*				stats_latch;
+	/** Statistics for query optimization. Mostly protected by
+	dict_sys->mutex. @{ */
 
 	/** TRUE if statistics have been calculated the first time after
 	database startup or table creation. */
@@ -1946,11 +1985,8 @@ struct dict_table_t {
 	from a select. */
 	lock_t*					autoinc_lock;
 
-	/** Creation state of autoinc_mutex member */
-	volatile os_once::state_t		autoinc_mutex_created;
-
 	/** Mutex protecting the autoincrement counter. */
-	ib_mutex_t*				autoinc_mutex;
+	mysql_mutex_t				autoinc_mutex;
 
 	/** Autoinc counter value to give to the next inserted row. */
 	ib_uint64_t				autoinc;
@@ -2057,64 +2093,6 @@ struct dict_foreign_add_to_referenced_table {
 	}
 };
 
-/** Destroy the autoinc latch of the given table.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	table	table whose stats latch to destroy */
-inline
-void
-dict_table_autoinc_destroy(
-	dict_table_t*	table)
-{
-	if (table->autoinc_mutex_created == os_once::DONE
-	    && table->autoinc_mutex != NULL) {
-		mutex_free(table->autoinc_mutex);
-		UT_DELETE(table->autoinc_mutex);
-	}
-}
-
-/** Request for lazy creation of the autoinc latch of a given table.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	table	table whose autoinc latch is to be created. */
-inline
-void
-dict_table_autoinc_create_lazy(
-	dict_table_t*	table)
-{
-	table->autoinc_mutex = NULL;
-	table->autoinc_mutex_created = os_once::NEVER_DONE;
-}
-
-/** Request a lazy creation of dict_index_t::zip_pad::mutex.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	index	index whose zip_pad mutex is to be created */
-inline
-void
-dict_index_zip_pad_mutex_create_lazy(
-	dict_index_t*	index)
-{
-	index->zip_pad.mutex = NULL;
-	index->zip_pad.mutex_created = os_once::NEVER_DONE;
-}
-
-/** Destroy the zip_pad_mutex of the given index.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	table	table whose stats latch to destroy */
-inline
-void
-dict_index_zip_pad_mutex_destroy(
-	dict_index_t*	index)
-{
-	if (index->zip_pad.mutex_created == os_once::DONE
-	    && index->zip_pad.mutex != NULL) {
-		mutex_free(index->zip_pad.mutex);
-		UT_DELETE(index->zip_pad.mutex);
-	}
-}
-
 /** Release the zip_pad_mutex of a given index.
 @param[in,out]	index	index whose zip_pad_mutex is to be released */
 inline
@@ -2122,21 +2100,8 @@ void
 dict_index_zip_pad_unlock(
 	dict_index_t*	index)
 {
-	mutex_exit(index->zip_pad.mutex);
+	mysql_mutex_unlock(&index->zip_pad.mutex);
 }
-
-#ifdef UNIV_DEBUG
-/** Check if the current thread owns the autoinc_mutex of a given table.
-@param[in]	table	the autoinc_mutex belongs to this table
-@return true, if the current thread owns the autoinc_mutex, false otherwise.*/
-inline
-bool
-dict_table_autoinc_own(
-	const dict_table_t*	table)
-{
-	return(mutex_own(table->autoinc_mutex));
-}
-#endif /* UNIV_DEBUG */
 
 /** Check whether the col is used in spatial index or regular index.
 @param[in]	col	column to check

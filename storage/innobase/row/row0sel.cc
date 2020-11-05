@@ -2,7 +2,7 @@
 
 Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
-Copyright (c) 2015, 2019, MariaDB Corporation.
+Copyright (c) 2015, 2020, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -153,11 +153,15 @@ fields are compared with collation!
 				must be protected by a page s-latch
 @param[in]	clust_index	clustered index
 @param[in]	thr		query thread
-@return TRUE if the secondary record is equal to the corresponding
-fields in the clustered record, when compared with collation;
-FALSE if not equal or if the clustered record has been marked for deletion */
+@retval	DB_COMPUTE_VALUE_FAILED in case of virtual column value computation
+	failure.
+@retval DB_SUCCESS_LOCKED_REC if the secondary record is equal to the
+	corresponding fields in the clustered record, when compared with
+	collation;
+@retval DB_SUCCESS if not equal or if the clustered record has been marked
+	for deletion */
 static
-ibool
+dberr_t
 row_sel_sec_rec_is_for_clust_rec(
 	const rec_t*	sec_rec,
 	dict_index_t*	sec_index,
@@ -171,13 +175,10 @@ row_sel_sec_rec_is_for_clust_rec(
 	ulint		n;
 	ulint		i;
 	mem_heap_t*	heap		= NULL;
-	ulint		clust_offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint		sec_offsets_[REC_OFFS_SMALL_SIZE];
-	ulint*		clust_offs	= clust_offsets_;
-	ulint*		sec_offs	= sec_offsets_;
-	ibool		is_equal	= TRUE;
-	VCOL_STORAGE*	vcol_storage= 0;
-	byte*		record;
+	rec_offs	clust_offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs	sec_offsets_[REC_OFFS_SMALL_SIZE];
+	rec_offs*	clust_offs	= clust_offsets_;
+	rec_offs*	sec_offs	= sec_offsets_;
 
 	rec_offs_init(clust_offsets_);
 	rec_offs_init(sec_offsets_);
@@ -192,10 +193,11 @@ row_sel_sec_rec_is_for_clust_rec(
 		it is not visible in the read view.  Besides,
 		if there are any externally stored columns,
 		some of them may have already been purged. */
-		return(FALSE);
+		return DB_SUCCESS;
 	}
 
 	heap = mem_heap_create(256);
+	ib_vcol_row vc(heap);
 
 	clust_offs = rec_get_offsets(clust_rec, clust_index, clust_offs,
 				     true, ULINT_UNDEFINED, &heap);
@@ -224,16 +226,9 @@ row_sel_sec_rec_is_for_clust_rec(
 			dfield_t*		vfield;
 			row_ext_t*		ext;
 
-			if (!vcol_storage)
-			{
-				TABLE *mysql_table= thr->prebuilt->m_mysql_table;
-				innobase_allocate_row_for_vcol(thr_get_trx(thr)->mysql_thd,
-							       clust_index,
-							       &heap,
-							       &mysql_table,
-							       &record,
-							       &vcol_storage);
-			}
+			byte *record = vc.record(thr_get_trx(thr)->mysql_thd,
+						 clust_index,
+						 &thr->prebuilt->m_mysql_table);
 
 			v_col = reinterpret_cast<const dict_v_col_t*>(col);
 
@@ -250,6 +245,10 @@ row_sel_sec_rec_is_for_clust_rec(
 					thr->prebuilt->m_mysql_table,
 					record, NULL, NULL, NULL);
 
+			if (vfield == NULL) {
+				innobase_report_computed_value_failed(row);
+				return DB_COMPUTE_VALUE_FAILED;
+			}
 			clust_len = vfield->len;
 			clust_field = static_cast<byte*>(vfield->data);
 		} else {
@@ -283,7 +282,7 @@ row_sel_sec_rec_is_for_clust_rec(
 					    sec_field, sec_len,
 					    ifield->prefix_len,
 					    clust_index->table)) {
-					goto inequal;
+					return DB_SUCCESS;
 				}
 
 				continue;
@@ -319,28 +318,19 @@ row_sel_sec_rec_is_for_clust_rec(
 			rtr_read_mbr(sec_field, &sec_mbr);
 
 			if (!MBR_EQUAL_CMP(&sec_mbr, &tmp_mbr)) {
-				is_equal = FALSE;
-				goto func_exit;
+				return DB_SUCCESS;
 			}
 		} else {
 
 			if (0 != cmp_data_data(col->mtype, col->prtype,
 					       clust_field, len,
 					       sec_field, sec_len)) {
-inequal:
-				is_equal = FALSE;
-				goto func_exit;
+				return DB_SUCCESS;
 			}
 		}
 	}
 
-func_exit:
-	if (UNIV_LIKELY_NULL(heap)) {
-		if (UNIV_LIKELY_NULL(vcol_storage))
-			innobase_free_row_for_vcol(vcol_storage);
-		mem_heap_free(heap);
-	}
-	return(is_equal);
+	return DB_SUCCESS_LOCKED_REC;
 }
 
 /*********************************************************************//**
@@ -493,7 +483,7 @@ row_sel_fetch_columns(
 	dict_index_t*	index,	/*!< in: record index */
 	const rec_t*	rec,	/*!< in: record in a clustered or non-clustered
 				index; must be protected by a page latch */
-	const ulint*	offsets,/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*	offsets,/*!< in: rec_get_offsets(rec, index) */
 	sym_node_t*	column)	/*!< in: first column in a column list, or
 				NULL */
 {
@@ -759,7 +749,7 @@ row_sel_build_prev_vers(
 	ReadView*	read_view,	/*!< in: read view */
 	dict_index_t*	index,		/*!< in: plan node for table */
 	rec_t*		rec,		/*!< in: record in a clustered index */
-	ulint**		offsets,	/*!< in/out: offsets returned by
+	rec_offs**	offsets,	/*!< in/out: offsets returned by
 					rec_get_offsets(rec, plan->index) */
 	mem_heap_t**	offset_heap,	/*!< in/out: memory heap from which
 					the offsets are allocated */
@@ -794,7 +784,7 @@ row_sel_build_committed_vers_for_mysql(
 	dict_index_t*	clust_index,	/*!< in: clustered index */
 	row_prebuilt_t*	prebuilt,	/*!< in: prebuilt struct */
 	const rec_t*	rec,		/*!< in: record in a clustered index */
-	ulint**		offsets,	/*!< in/out: offsets returned by
+	rec_offs**	offsets,	/*!< in/out: offsets returned by
 					rec_get_offsets(rec, clust_index) */
 	mem_heap_t**	offset_heap,	/*!< in/out: memory heap from which
 					the offsets are allocated */
@@ -906,10 +896,10 @@ row_sel_get_clust_rec(
 	dict_index_t*	index;
 	rec_t*		clust_rec;
 	rec_t*		old_vers;
-	dberr_t		err;
+	dberr_t		err		= DB_SUCCESS;
 	mem_heap_t*	heap		= NULL;
-	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*		offsets		= offsets_;
+	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets		= offsets_;
 	rec_offs_init(offsets_);
 
 	*out_rec = NULL;
@@ -948,7 +938,7 @@ row_sel_get_clust_rec(
 		clustered index record did not exist in the read view of
 		trx. */
 
-		goto func_exit;
+		goto err_exit;
 	}
 
 	offsets = rec_get_offsets(clust_rec, index, offsets, true,
@@ -982,9 +972,9 @@ row_sel_get_clust_rec(
 		switch (err) {
 		case DB_SUCCESS:
 		case DB_SUCCESS_LOCKED_REC:
-			/* Declare the variable uninitialized in Valgrind.
+			/* Declare the variable uninitialized.
 			It should be set to DB_SUCCESS at func_exit. */
-			UNIV_MEM_INVALID(&err, sizeof err);
+			MEM_UNDEFINED(&err, sizeof err);
 			break;
 		default:
 			goto err_exit;
@@ -1011,7 +1001,7 @@ row_sel_get_clust_rec(
 			clust_rec = old_vers;
 
 			if (clust_rec == NULL) {
-				goto func_exit;
+				goto err_exit;
 			}
 		}
 
@@ -1028,13 +1018,14 @@ row_sel_get_clust_rec(
 		visit through secondary index records that would not really
 		exist in our snapshot. */
 
-		if ((old_vers
-		     || rec_get_deleted_flag(rec, dict_table_is_comp(
-						     plan->table)))
-		    && !row_sel_sec_rec_is_for_clust_rec(rec, plan->index,
-							 clust_rec, index,
-							 thr)) {
-			goto func_exit;
+		if (old_vers || rec_get_deleted_flag(rec, dict_table_is_comp(
+							       plan->table))) {
+			err = row_sel_sec_rec_is_for_clust_rec(rec,
+							plan->index, clust_rec,
+							index, thr);
+			if (err != DB_SUCCESS_LOCKED_REC) {
+				goto err_exit;
+			}
 		}
 	}
 
@@ -1047,7 +1038,6 @@ row_sel_get_clust_rec(
 	row_sel_fetch_columns(index, clust_rec, offsets,
 			      UT_LIST_GET_FIRST(plan->columns));
 	*out_rec = clust_rec;
-func_exit:
 	err = DB_SUCCESS;
 err_exit:
 	if (UNIV_LIKELY_NULL(heap)) {
@@ -1068,7 +1058,7 @@ sel_set_rtr_rec_lock(
 	btr_pcur_t*		pcur,	/*!< in: cursor */
 	const rec_t*		first_rec,/*!< in: record */
 	dict_index_t*		index,	/*!< in: index */
-	const ulint*		offsets,/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*		offsets,/*!< in: rec_get_offsets(rec, index) */
 	ulint			mode,	/*!< in: lock mode */
 	ulint			type,	/*!< in: LOCK_ORDINARY, LOCK_GAP, or
 					LOC_REC_NOT_GAP */
@@ -1080,8 +1070,8 @@ sel_set_rtr_rec_lock(
 	dberr_t		err = DB_SUCCESS;
 	trx_t*		trx = thr_get_trx(thr);
 	buf_block_t*	cur_block = btr_pcur_get_block(pcur);
-	ulint           offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*          my_offsets = const_cast<ulint*>(offsets);
+	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	my_offsets = const_cast<rec_offs*>(offsets);
 	rec_t*		rec = const_cast<rec_t*>(first_rec);
 	rtr_rec_vector*	match_rec;
 	rtr_rec_vector::iterator end;
@@ -1234,7 +1224,7 @@ sel_set_rec_lock(
 	btr_pcur_t*		pcur,	/*!< in: cursor */
 	const rec_t*		rec,	/*!< in: record */
 	dict_index_t*		index,	/*!< in: index */
-	const ulint*		offsets,/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*		offsets,/*!< in: rec_get_offsets(rec, index) */
 	ulint			mode,	/*!< in: lock mode */
 	ulint			type,	/*!< in: LOCK_ORDINARY, LOCK_GAP, or
 					LOC_REC_NOT_GAP */
@@ -1288,10 +1278,6 @@ void
 row_sel_open_pcur(
 /*==============*/
 	plan_t*		plan,	/*!< in: table plan */
-#ifdef BTR_CUR_HASH_ADAPT
-	rw_lock_t*	ahi_latch,
-				/*!< in: the adaptive hash index latch */
-#endif /* BTR_CUR_HASH_ADAPT */
 	mtr_t*		mtr)	/*!< in/out: mini-transaction */
 {
 	dict_index_t*	index;
@@ -1335,7 +1321,7 @@ row_sel_open_pcur(
 
 		btr_pcur_open_with_no_init(index, plan->tuple, plan->mode,
 					   BTR_SEARCH_LEAF, &plan->pcur,
-					   ahi_latch, mtr);
+					   NULL, mtr);
 	} else {
 		/* Open the cursor to the start or the end of the index
 		(FALSE: no init) */
@@ -1480,16 +1466,12 @@ row_sel_try_search_shortcut(
 	ut_ad(plan->unique_search);
 	ut_ad(!plan->must_get_clust);
 
-	rw_lock_t* ahi_latch = btr_get_search_latch(index);
-	rw_lock_s_lock(ahi_latch);
-
-	row_sel_open_pcur(plan, ahi_latch, mtr);
+	row_sel_open_pcur(plan, mtr);
 
 	const rec_t* rec = btr_pcur_get_rec(&(plan->pcur));
 
 	if (!page_rec_is_user_rec(rec) || rec_is_metadata(rec, index)) {
 retry:
-		rw_lock_s_unlock(ahi_latch);
 		return(SEL_RETRY);
 	}
 
@@ -1501,7 +1483,6 @@ retry:
 
 	if (btr_pcur_get_up_match(&(plan->pcur)) < plan->n_exact_match) {
 exhausted:
-		rw_lock_s_unlock(ahi_latch);
 		return(SEL_EXHAUSTED);
 	}
 
@@ -1509,8 +1490,8 @@ exhausted:
 	a previous version of the record */
 
 	mem_heap_t*	heap		= NULL;
-	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*		offsets		= offsets_;
+	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets		= offsets_;
 	rec_offs_init(offsets_);
 	offsets = rec_get_offsets(rec, index, offsets, true,
 				  ULINT_UNDEFINED, &heap);
@@ -1547,7 +1528,6 @@ exhausted:
 	ut_ad(plan->pcur.latch_mode == BTR_SEARCH_LEAF);
 
 	plan->n_rows_fetched++;
-	rw_lock_s_unlock(ahi_latch);
 
 	if (UNIV_LIKELY_NULL(heap)) {
 		mem_heap_free(heap);
@@ -1593,8 +1573,8 @@ row_sel(
 	to the next non-clustered record */
 	dberr_t		err;
 	mem_heap_t*	heap				= NULL;
-	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*		offsets				= offsets_;
+	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets				= offsets_;
 	rec_offs_init(offsets_);
 
 	ut_ad(thr->run_node == node);
@@ -1669,11 +1649,7 @@ table_loop:
 	if (!plan->pcur_is_open) {
 		/* Evaluate the expressions to build the search tuple and
 		open the cursor */
-		row_sel_open_pcur(plan,
-#ifdef BTR_CUR_HASH_ADAPT
-				  NULL,
-#endif /* BTR_CUR_HASH_ADAPT */
-				  &mtr);
+		row_sel_open_pcur(plan, &mtr);
 
 		cursor_just_opened = TRUE;
 
@@ -2701,7 +2677,7 @@ row_sel_store_row_id_to_prebuilt(
 	row_prebuilt_t*		prebuilt,	/*!< in/out: prebuilt */
 	const rec_t*		index_rec,	/*!< in: record */
 	const dict_index_t*	index,		/*!< in: index of the record */
-	const ulint*		offsets)	/*!< in: rec_get_offsets
+	const rec_offs*		offsets)	/*!< in: rec_get_offsets
 						(index_rec, index) */
 {
 	const byte*	data;
@@ -2752,9 +2728,9 @@ row_sel_field_store_in_mysql_format_func(
 #endif /* UNIV_DEBUG */
 
 	ut_ad(len != UNIV_SQL_NULL);
-	UNIV_MEM_ASSERT_RW(data, len);
-	UNIV_MEM_ASSERT_W(dest, templ->mysql_col_len);
-	UNIV_MEM_INVALID(dest, templ->mysql_col_len);
+	MEM_CHECK_DEFINED(data, len);
+	MEM_CHECK_ADDRESSABLE(dest, templ->mysql_col_len);
+	MEM_UNDEFINED(dest, templ->mysql_col_len);
 
 	switch (templ->type) {
 		const byte*	field_end;
@@ -2927,7 +2903,7 @@ row_sel_store_mysql_field(
 	row_prebuilt_t*		prebuilt,
 	const rec_t*		rec,
 	const dict_index_t*	index,
-	const ulint*		offsets,
+	const rec_offs*		offsets,
 	ulint			field_no,
 	const mysql_row_templ_t*templ)
 {
@@ -3006,9 +2982,9 @@ row_sel_store_mysql_field(
 			NULL value is set to the default value. */
 			ut_ad(templ->mysql_null_bit_mask);
 
-			UNIV_MEM_ASSERT_RW(prebuilt->default_rec
-					   + templ->mysql_col_offset,
-					   templ->mysql_col_len);
+			MEM_CHECK_DEFINED(prebuilt->default_rec
+					  + templ->mysql_col_offset,
+					  templ->mysql_col_len);
 			mysql_rec[templ->mysql_null_byte_offset]
 				|= (byte) templ->mysql_null_bit_mask;
 			memcpy(mysql_rec + templ->mysql_col_offset,
@@ -3083,7 +3059,7 @@ static bool row_sel_store_mysql_rec(
 	const dtuple_t*	vrow,
 	bool		rec_clust,
 	const dict_index_t* index,
-	const ulint*	offsets)
+	const rec_offs*	offsets)
 {
 	DBUG_ENTER("row_sel_store_mysql_rec");
 
@@ -3214,7 +3190,7 @@ row_sel_build_prev_vers_for_mysql(
 	dict_index_t*	clust_index,	/*!< in: clustered index */
 	row_prebuilt_t*	prebuilt,	/*!< in: prebuilt struct */
 	const rec_t*	rec,		/*!< in: record in a clustered index */
-	ulint**		offsets,	/*!< in/out: offsets returned by
+	rec_offs**	offsets,	/*!< in/out: offsets returned by
 					rec_get_offsets(rec, clust_index) */
 	mem_heap_t**	offset_heap,	/*!< in/out: memory heap from which
 					the offsets are allocated */
@@ -3240,20 +3216,46 @@ row_sel_build_prev_vers_for_mysql(
 	return(err);
 }
 
-/** Helper class to cache clust_rec and old_ver */
+/** Helper class to cache clust_rec and old_vers */
 class Row_sel_get_clust_rec_for_mysql
 {
-	const rec_t *cached_clust_rec;
-	rec_t *cached_old_vers;
+  const rec_t *cached_clust_rec;
+  rec_t *cached_old_vers;
+  lsn_t cached_lsn;
+  page_id_t cached_page_id;
+
+#ifdef UNIV_DEBUG
+  void check_eq(const dict_index_t *index, const rec_offs *offsets) const
+  {
+    rec_offs vers_offs[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS];
+    rec_offs_init(vers_offs);
+    mem_heap_t *heap= NULL;
+
+    ut_ad(rec_offs_validate(cached_clust_rec, index, offsets));
+    ut_ad(index->first_user_field() <= rec_offs_n_fields(offsets));
+    ut_ad(vers_offs == rec_get_offsets(cached_old_vers, index, vers_offs, true,
+                                       index->db_trx_id(), &heap));
+    ut_ad(!heap);
+    for (unsigned n= index->db_trx_id(); n--; )
+    {
+      const dict_col_t *col= dict_index_get_nth_col(index, n);
+      ulint len1, len2;
+      const byte *b1= rec_get_nth_field(cached_clust_rec, offsets, n, &len1);
+      const byte *b2= rec_get_nth_field(cached_old_vers, vers_offs, n, &len2);
+      ut_ad(!cmp_data_data(col->mtype, col->prtype, b1, len1, b2, len2));
+    }
+  }
+#endif
 
 public:
-	Row_sel_get_clust_rec_for_mysql() :
-	cached_clust_rec(NULL), cached_old_vers(NULL) {}
+  Row_sel_get_clust_rec_for_mysql() :
+    cached_clust_rec(NULL), cached_old_vers(NULL), cached_lsn(0),
+    cached_page_id(page_id_t(0,0)) {}
 
-	dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
-			const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
-			ulint **offsets, mem_heap_t **offset_heap,
-			dtuple_t **vrow, mtr_t *mtr);
+  dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
+                     const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
+                     rec_offs **offsets, mem_heap_t **offset_heap,
+                     dtuple_t **vrow, mtr_t *mtr);
 };
 
 /*********************************************************************//**
@@ -3275,7 +3277,7 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 				it, NULL if the old version did not exist
 				in the read view, i.e., it was a fresh
 				inserted version */
-	ulint**		offsets,/*!< in: offsets returned by
+	rec_offs**	offsets,/*!< in: offsets returned by
 				rec_get_offsets(rec, sec_index);
 				out: offsets returned by
 				rec_get_offsets(out_rec, clust_index) */
@@ -3453,8 +3455,18 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 		    && !lock_clust_rec_cons_read_sees(
 			    clust_rec, clust_index, *offsets,
 			    &trx->read_view)) {
+			const buf_page_t& bpage = btr_pcur_get_block(
+				prebuilt->clust_pcur)->page;
 
-			if (clust_rec != cached_clust_rec) {
+			lsn_t lsn = bpage.newest_modification;
+			if (!lsn) {
+				lsn = mach_read_from_8(
+					page_align(clust_rec) + FIL_PAGE_LSN);
+			}
+
+			if (lsn != cached_lsn
+			    || bpage.id != cached_page_id
+			    || clust_rec != cached_clust_rec) {
 				/* The following call returns 'offsets' associated with
 				'old_vers' */
 				err = row_sel_build_prev_vers_for_mysql(
@@ -3466,6 +3478,8 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 
 					goto err_exit;
 				}
+				cached_lsn = lsn;
+				cached_page_id = bpage.id;
 				cached_clust_rec = clust_rec;
 				cached_old_vers = old_vers;
 			} else {
@@ -3476,7 +3490,8 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 				version of clust_rec and its old version
 				old_vers. Re-calculate the offsets for old_vers. */
 
-				if (old_vers != NULL) {
+				if (old_vers) {
+					ut_d(check_eq(clust_index, *offsets));
 					*offsets = rec_get_offsets(
 						old_vers, clust_index, *offsets,
 						true, ULINT_UNDEFINED, offset_heap);
@@ -3510,10 +3525,18 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 			|| trx->isolation_level <= TRX_ISO_READ_UNCOMMITTED
 			|| dict_index_is_spatial(sec_index)
 			|| rec_get_deleted_flag(rec, dict_table_is_comp(
-							sec_index->table)))
-		    && !row_sel_sec_rec_is_for_clust_rec(
-			    rec, sec_index, clust_rec, clust_index, thr)) {
-			clust_rec = NULL;
+							sec_index->table)))) {
+			err = row_sel_sec_rec_is_for_clust_rec(rec, sec_index,
+						clust_rec, clust_index, thr);
+			switch (err) {
+			case DB_SUCCESS:
+				clust_rec = NULL;
+				break;
+			case DB_SUCCESS_LOCKED_REC:
+				break;
+			default:
+				goto err_exit;
+			}
 		}
 
 		err = DB_SUCCESS;
@@ -3653,7 +3676,7 @@ row_sel_copy_cached_field_for_mysql(
 	buf += templ->mysql_col_offset;
 	cache += templ->mysql_col_offset;
 
-	UNIV_MEM_ASSERT_W(buf, templ->mysql_col_len);
+	MEM_CHECK_ADDRESSABLE(buf, templ->mysql_col_len);
 
 	if (templ->mysql_type == DATA_MYSQL_TRUE_VARCHAR
 	    && (templ->type != DATA_INT)) {
@@ -3663,7 +3686,7 @@ row_sel_copy_cached_field_for_mysql(
 		row_mysql_read_true_varchar(
 			&len, cache, templ->mysql_length_bytes);
 		len += templ->mysql_length_bytes;
-		UNIV_MEM_INVALID(buf, templ->mysql_col_len);
+		MEM_UNDEFINED(buf, templ->mysql_col_len);
 	} else {
 		len = templ->mysql_col_len;
 	}
@@ -3722,7 +3745,7 @@ row_sel_dequeue_cached_row_for_mysql(
 	ut_ad(prebuilt->n_fetch_cached > 0);
 	ut_ad(prebuilt->mysql_prefix_len <= prebuilt->mysql_row_len);
 
-	UNIV_MEM_ASSERT_W(buf, prebuilt->mysql_row_len);
+	MEM_CHECK_ADDRESSABLE(buf, prebuilt->mysql_row_len);
 
 	cached_rec = prebuilt->fetch_cache[prebuilt->fetch_cache_first];
 
@@ -3732,7 +3755,7 @@ row_sel_dequeue_cached_row_for_mysql(
 		/* The record is long. Copy it field by field, in case
 		there are some long VARCHAR column of which only a
 		small length is being used. */
-		UNIV_MEM_INVALID(buf, prebuilt->mysql_prefix_len);
+		MEM_UNDEFINED(buf, prebuilt->mysql_prefix_len);
 
 		/* First copy the NULL bits. */
 		ut_memcpy(buf, cached_rec, prebuilt->null_bitmap_len);
@@ -3816,8 +3839,8 @@ row_sel_fetch_last_buf(
 	}
 
 	ut_ad(prebuilt->fetch_cache_first == 0);
-	UNIV_MEM_INVALID(prebuilt->fetch_cache[prebuilt->n_fetch_cached],
-			 prebuilt->mysql_row_len);
+	MEM_UNDEFINED(prebuilt->fetch_cache[prebuilt->n_fetch_cached],
+		      prebuilt->mysql_row_len);
 
 	return(prebuilt->fetch_cache[prebuilt->n_fetch_cached]);
 }
@@ -3856,7 +3879,7 @@ row_sel_try_search_shortcut_for_mysql(
 /*==================================*/
 	const rec_t**	out_rec,/*!< out: record if found */
 	row_prebuilt_t*	prebuilt,/*!< in: prebuilt struct */
-	ulint**		offsets,/*!< in/out: for rec_get_offsets(*out_rec) */
+	rec_offs**	offsets,/*!< in/out: for rec_get_offsets(*out_rec) */
 	mem_heap_t**	heap,	/*!< in/out: heap for rec_get_offsets() */
 	mtr_t*		mtr)	/*!< in: started mtr */
 {
@@ -3918,7 +3941,7 @@ exhausted:
 
 /*********************************************************************//**
 Check a pushed-down index condition.
-@return ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
+@return ICP_ABORTED_BY_USER, ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
 static
 ICP_RESULT
 row_search_idx_cond_check(
@@ -3930,7 +3953,7 @@ row_search_idx_cond_check(
 	row_prebuilt_t*		prebuilt,	/*!< in/out: prebuilt struct
 						for the table handle */
 	const rec_t*		rec,		/*!< in: InnoDB record */
-	const ulint*		offsets)	/*!< in: rec_get_offsets() */
+	const rec_offs*		offsets)	/*!< in: rec_get_offsets() */
 {
 	ICP_RESULT	result;
 	ulint		i;
@@ -4018,8 +4041,8 @@ row_sel_fill_vrow(
 	dtuple_t**		vrow,
 	mem_heap_t*		heap)
 {
-	ulint           offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*		offsets	= offsets_;
+	rec_offs offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs* offsets	= offsets_;
 	rec_offs_init(offsets_);
 
 	ut_ad(!(*vrow));
@@ -4073,7 +4096,7 @@ rec_field_len_in_chars(
 	const dict_col_t*	col,
 	const ulint		field_no,
 	const rec_t*		rec,
-	const ulint*		offsets)
+	const rec_offs*		offsets)
 {
 	const ulint cset = dtype_get_charset_coll(col->prtype);
 	const CHARSET_INFO* cs = all_charsets[cset];
@@ -4100,10 +4123,14 @@ static
 bool row_search_with_covering_prefix(
 	row_prebuilt_t*	prebuilt,
 	const rec_t*	rec,
-	const ulint*	offsets)
+	const rec_offs*	offsets)
 {
 	const dict_index_t*	index = prebuilt->index;
 	ut_ad(!dict_index_is_clust(index));
+
+	if (dict_index_is_spatial(index)) {
+		return false;
+	}
 
 	if (!srv_prefix_index_cluster_optimization) {
 		return false;
@@ -4115,9 +4142,16 @@ bool row_search_with_covering_prefix(
 		return false;
 	}
 
+	/* We can avoid a clustered index lookup if
+	all of the following hold:
+	(1) all columns are in the secondary index
+	(2) all values for columns that are prefix-only
+	indexes are shorter than the prefix size
+	This optimization can avoid many IOs for certain schemas. */
 	for (ulint i = 0; i < prebuilt->n_template; i++) {
 		mysql_row_templ_t* templ = prebuilt->mysql_template + i;
 		ulint j = templ->rec_prefix_field_no;
+		ut_ad(!templ->mbminlen == !templ->mbmaxlen);
 
 		/** Condition (1) : is the field in the index. */
 		if (j == ULINT_UNDEFINED) {
@@ -4127,33 +4161,29 @@ bool row_search_with_covering_prefix(
 		/** Condition (2): If this is a prefix index then
 		row's value size shorter than prefix length. */
 
-		if (!templ->rec_field_is_prefix) {
+		if (!templ->rec_field_is_prefix
+		    || rec_offs_nth_sql_null(offsets, j)) {
 			continue;
 		}
 
-		ulint rec_size = rec_offs_nth_size(offsets, j);
 		const dict_field_t* field = dict_index_get_nth_field(index, j);
-		ulint max_chars = field->prefix_len / templ->mbmaxlen;
 
-		ut_a(field->prefix_len > 0);
-
-		if (rec_size < max_chars) {
-			/* Record in bytes shorter than the index
-			prefix length in char. */
+		if (!field->prefix_len) {
 			continue;
 		}
 
-		if (rec_size * templ->mbminlen >= field->prefix_len) {
+		const ulint rec_size = rec_offs_nth_size(offsets, j);
+
+		if (rec_size >= field->prefix_len) {
 			/* Shortest representation string by the
 			byte length of the record is longer than the
 			maximum possible index prefix. */
 			return false;
 		}
 
-		size_t num_chars = rec_field_len_in_chars(
-			field->col, j, rec, offsets);
-
-		if (num_chars >= max_chars) {
+		if (templ->mbminlen != templ->mbmaxlen
+		    && rec_field_len_in_chars(field->col, j, rec, offsets)
+		    >= field->prefix_len / templ->mbmaxlen) {
 			/* No of chars to store the record exceeds
 			the index prefix character length. */
 			return false;
@@ -4230,8 +4260,8 @@ row_search_mvcc(
 	ibool		same_user_rec;
 	mtr_t		mtr;
 	mem_heap_t*	heap				= NULL;
-	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*		offsets				= offsets_;
+	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets				= offsets_;
 	ibool		table_lock_waited		= FALSE;
 	byte*		next_buf			= 0;
 	bool		spatial_search			= false;
@@ -4272,7 +4302,7 @@ row_search_mvcc(
 		    || prebuilt->m_read_virtual_key);
 
 	/* Reset the new record lock info if srv_locks_unsafe_for_binlog
-	is set or session is using a READ COMMITED isolation level. Then
+	is set or session is using a READ COMMITTED isolation level. Then
 	we are able to remove the record locks set here on an individual
 	row. */
 	prebuilt->new_rec_locks = 0;
@@ -4432,10 +4462,13 @@ row_search_mvcc(
 					switch (row_search_idx_cond_check(
 							buf, prebuilt,
 							rec, offsets)) {
+                                        case ICP_ABORTED_BY_USER:
+						mtr_commit(&mtr);
+						err = DB_INTERRUPTED;
+						goto func_exit;
+                                        case ICP_ERROR:
 					case ICP_NO_MATCH:
 					case ICP_OUT_OF_RANGE:
-                                        case ICP_ABORTED_BY_USER:
-                                        case ICP_ERROR:
 						goto shortcut_mismatch;
 					case ICP_MATCH:
 						goto shortcut_match;
@@ -4463,7 +4496,6 @@ row_search_mvcc(
 
 			shortcut_match:
 				mtr.commit();
-
 				/* NOTE that we do NOT store the cursor
 				position */
 				err = DB_SUCCESS;
@@ -4979,7 +5011,7 @@ wrong_offs:
 		existence with LOCK_REC_NOT_GAP. */
 
 		/* If innodb_locks_unsafe_for_binlog option is used
-		or this session is using a READ COMMITED isolation
+		or this session is using a READ COMMITTED isolation
 		level we lock only the record, i.e., next-key locking is
 		not used. */
 
@@ -5211,8 +5243,10 @@ no_gap_lock:
 						buf, prebuilt, rec, offsets)) {
 				case ICP_NO_MATCH:
 					goto next_rec;
-				case ICP_OUT_OF_RANGE:
                                 case ICP_ABORTED_BY_USER:
+					err = DB_INTERRUPTED;
+					goto idx_cond_failed;
+				case ICP_OUT_OF_RANGE:
                                 case ICP_ERROR:
 					err = DB_RECORD_NOT_FOUND;
 					goto idx_cond_failed;
@@ -5271,9 +5305,11 @@ locks_ok_del_marked:
 			row_unlock_for_mysql(prebuilt, TRUE);
 		}
 		goto next_rec;
+	case ICP_ABORTED_BY_USER:
+		err = DB_INTERRUPTED;
+		goto idx_cond_failed;
 	case ICP_OUT_OF_RANGE:
-        case ICP_ABORTED_BY_USER:
-        case ICP_ERROR:
+	case ICP_ERROR:
 		err = DB_RECORD_NOT_FOUND;
 		goto idx_cond_failed;
 	case ICP_MATCH:
@@ -5931,8 +5967,8 @@ row_search_autoinc_read_column(
 	const byte*	data;
 	ib_uint64_t	value;
 	mem_heap_t*	heap = NULL;
-	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
-	ulint*		offsets	= offsets_;
+	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets	= offsets_;
 
 	rec_offs_init(offsets_);
 	ut_ad(page_rec_is_leaf(rec));

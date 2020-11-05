@@ -75,6 +75,7 @@ struct Schema_specification_st;
 struct TABLE;
 struct SORT_FIELD_ATTR;
 class Vers_history_point;
+class Schema;
 
 
 /**
@@ -292,6 +293,15 @@ class Temporal_with_date: protected MYSQL_TIME
 {
 protected:
   void make_from_item(THD *thd, Item *item, sql_mode_t flags);
+
+  ulong daynr() const
+  {
+    return (ulong) ::calc_daynr((uint) year, (uint) month, (uint) day);
+  }
+  int weekday(bool sunday_first_day_of_week) const
+  {
+    return ::calc_weekday(daynr(), sunday_first_day_of_week);
+  }
   Temporal_with_date(THD *thd, Item *item, sql_mode_t flags)
   {
     make_from_item(thd, item, flags);
@@ -388,6 +398,11 @@ public:
   {
     DBUG_ASSERT(is_valid_datetime_slow());
     return hour == 0 && minute == 0 && second == 0 && second_part == 0;
+  }
+  int weekday(bool sunday_first_day_of_week) const
+  {
+    DBUG_ASSERT(is_valid_datetime_slow());
+    return Temporal_with_date::weekday(sunday_first_day_of_week);
   }
   const MYSQL_TIME *get_mysql_time() const
   {
@@ -1048,6 +1063,7 @@ public:
   Type_handler *aggregate_for_num_op_traditional(const Type_handler *h1,
                                                  const Type_handler *h2);
 
+  virtual Schema *schema() const;
   virtual const Name name() const= 0;
   virtual enum_field_types field_type() const= 0;
   virtual enum_field_types real_field_type() const { return field_type(); }
@@ -1216,6 +1232,8 @@ public:
   virtual void sortlength(THD *thd,
                           const Type_std_attributes *item,
                           SORT_FIELD_ATTR *attr) const= 0;
+
+  virtual bool is_packable() const { return false; }
 
   virtual uint32 max_display_length(const Item *item) const= 0;
   virtual uint32 calc_pack_length(uint32 length) const= 0;
@@ -2203,6 +2221,9 @@ public:
   void sortlength(THD *thd,
                   const Type_std_attributes *item,
                   SORT_FIELD_ATTR *attr) const;
+
+  bool is_packable()const { return true; }
+
   bool Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *c,

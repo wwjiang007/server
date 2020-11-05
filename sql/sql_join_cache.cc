@@ -1396,7 +1396,8 @@ uint JOIN_CACHE::write_record_data(uchar * link, bool *is_full)
 	blob_field->get_image(cp, copy->length, 
 			      blob_field->charset());
         DBUG_ASSERT(cp + copy->length + copy->blob_length <= buff + buff_size);
-	memcpy(cp+copy->length, copy->str, copy->blob_length);               
+        if (copy->blob_length)
+          memcpy(cp+copy->length, copy->str, copy->blob_length);
 	cp+= copy->length+copy->blob_length;
       }
       break;
@@ -2141,7 +2142,7 @@ enum_nested_loop_state JOIN_CACHE::join_records(bool skip_last)
     DBUG_ASSERT(!is_key_access());
     /*
        Restore the last record from the join buffer to generate
-       all extentions for it.
+       all extensions for it.
     */
     get_record();		               
   }

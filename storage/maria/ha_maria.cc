@@ -296,7 +296,7 @@ static MYSQL_SYSVAR_BOOL(encrypt_tables, maria_encrypt_tables, PLUGIN_VAR_OPCMDA
        "and not FIXED/DYNAMIC)",
        0, 0, 0);
 
-#ifdef HAVE_PSI_INTERFACE
+#if defined HAVE_PSI_INTERFACE && !defined EMBEDDED_LIBRARY
 
 static PSI_mutex_info all_aria_mutexes[]=
 {
@@ -1157,12 +1157,12 @@ int ha_maria::open(const char *name, int mode, uint test_if_locked)
 
   /*
     For static size rows, tell MariaDB that we will access all bytes
-    in the record when writing it.  This signals MariaDB to initalize
+    in the record when writing it.  This signals MariaDB to initialize
     the full row to ensure we don't get any errors from valgrind and
     that all bytes in the row is properly reset.
   */
   if (file->s->data_file_type == STATIC_RECORD &&
-      (file->s->has_varchar_fields | file->s->has_null_fields))
+      (file->s->has_varchar_fields || file->s->has_null_fields))
     int_table_flags|= HA_RECORD_MUST_BE_CLEAN_ON_WRITE;
 
   for (i= 0; i < table->s->keys; i++)
@@ -2439,6 +2439,9 @@ int ha_maria::info(uint flag)
 {
   MARIA_INFO maria_info;
   char name_buff[FN_REFLEN];
+
+  if (!table)
+    return 0;
 
   (void) maria_status(file, &maria_info, flag);
   if (flag & HA_STATUS_VARIABLE)

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2017 MariaDB
+   Copyright (c) 2017, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -307,7 +307,7 @@ struct SplM_field_ext_info: public SplM_field_info
     8. P contains some references on the columns of the joined tables C
        occurred also in the select list of this join
     9. There are defined some keys usable for ref access of fields from C
-       with available statistics. 
+       with available statistics.
 
   @retval
     true   if the answer is positive
@@ -477,6 +477,15 @@ bool JOIN::check_for_splittable_materialized()
   /* Attach this info to the table T */
   derived->table->set_spl_opt_info(spl_opt_info);
 
+  /*
+    If this is specification of a materialized derived table T that is
+    potentially splittable and is used in the from list of the right operand
+    of an IN predicand transformed to a semi-join then the embedding semi-join
+    nest is not allowed to be materialized.
+  */
+  if (derived && derived->is_materialized_derived() &&
+      derived->embedding && derived->embedding->sj_subq_pred)
+    derived->embedding->sj_subq_pred->types_allow_materialization= FALSE;
   return true;
 }
 
@@ -742,13 +751,13 @@ void JOIN::add_keyuses_for_splitting()
                        added_keyuse_count))
     goto err;
 
-  memcpy(keyuse.buffer,
-         save_qep->keyuse.buffer,
-         (size_t) save_qep->keyuse.elements * keyuse.size_of_element);
-  keyuse.elements= save_qep->keyuse.elements;
+  idx= keyuse.elements= save_qep->keyuse.elements;
+  if (keyuse.elements)
+    memcpy(keyuse.buffer,
+           save_qep->keyuse.buffer,
+           (size_t) keyuse.elements * keyuse.size_of_element);
 
   keyuse_ext= &ext_keyuses_for_splitting->at(0);
-  idx= save_qep->keyuse.elements;
   for (i=0; i < added_keyuse_count; i++, keyuse_ext++, idx++)
   {
     set_dynamic(&keyuse, (KEYUSE *) keyuse_ext, idx);
@@ -959,7 +968,7 @@ SplM_plan_info * JOIN_TAB::choose_best_splitting(double record_count,
         The plan for the chosen key has not been found in the cache.
         Build a new plan and save info on it in the cache
       */
-      table_map all_table_map= (1 << join->table_count) - 1;
+      table_map all_table_map= (((table_map) 1) << join->table_count) - 1;
       reset_validity_vars_for_keyuses(best_key_keyuse_ext_start, best_table,
                                       best_key, remaining_tables, true);
       choose_plan(join, all_table_map & ~join->const_table_map);

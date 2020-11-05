@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB Corporation
+   Copyright (c) 2009, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -646,7 +646,7 @@ String *Item_func_concat_operator_oracle::val_str(String *str)
 {
   DBUG_ASSERT(fixed == 1);
   THD *thd= current_thd;
-  String *res;
+  String *res= NULL;
   uint i;
 
   null_value=0;
@@ -656,7 +656,7 @@ String *Item_func_concat_operator_oracle::val_str(String *str)
     if ((res= args[i]->val_str(str)))
       break;
   }
-  if (i == arg_count)
+  if (!res)
     goto null;
 
   if (res != str)
@@ -990,7 +990,7 @@ String *Item_func_concat_ws::val_str(String *str)
 	goto null; // Must be a blob
     }
     else if (res2 == &tmp_value)
-    {						// This can happend only 1 time
+    {						// This can happen only 1 time
       if (tmp_value.replace(0,0,*sep_str) || tmp_value.replace(0,0,*res))
 	goto null;
       res= &tmp_value;
@@ -1141,7 +1141,7 @@ bool Item_func_reverse::fix_length_and_dec()
 }
 
 /**
-  Replace all occurences of string2 in string1 with string3.
+  Replace all occurrences of string2 in string1 with string3.
 
   Don't reallocate val_str() if not needed.
 
@@ -2404,7 +2404,7 @@ String *Item_func_sqlerrm::val_str(String *str)
               system_charset_info);
     return str;
   }
-  str->copy(STRING_WITH_LEN("normal, successful completition"),
+  str->copy(STRING_WITH_LEN("normal, successful completion"),
             system_charset_info);
   return str;
 }
@@ -3997,7 +3997,7 @@ bool Item_func_export_set::fix_length_and_dec()
   using in a SQL statement.
 
   Adds a \\ before all characters that needs to be escaped in a SQL string.
-  We also escape '^Z' (END-OF-FILE in windows) to avoid probelms when
+  We also escape '^Z' (END-OF-FILE in windows) to avoid problems when
   running commands from a file in windows.
 
   This function is very useful when you want to generate SQL statements.

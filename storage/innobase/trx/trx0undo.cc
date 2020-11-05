@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2014, 2019, MariaDB Corporation.
+Copyright (c) 2014, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -526,7 +526,7 @@ trx_undo_seg_create(fil_space_t* space, trx_rsegf_t* rseg_hdr, ulint* id,
 	}
 
 	/* Allocate a new file segment for the undo log */
-	block = fseg_create(space, 0, TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER,
+	block = fseg_create(space, TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER,
 			    mtr, true);
 
 	space->release_free_extents(n_reserved);
@@ -844,7 +844,7 @@ trx_undo_free_page(
 		    TRX_UNDO_PAGE_HDR + TRX_UNDO_PAGE_NODE + undo_page, mtr);
 
 	fseg_free_page(TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER + header_page,
-		       rseg->space, page_no, false, mtr);
+		       rseg->space, page_no, mtr);
 
 	const fil_addr_t last_addr = flst_get_last(
 		TRX_UNDO_SEG_HDR + TRX_UNDO_PAGE_LIST + header_page, mtr);
@@ -1045,7 +1045,7 @@ trx_undo_seg_free(
 
 		file_seg = seg_header + TRX_UNDO_FSEG_HEADER;
 
-		finished = fseg_free_step(file_seg, false, &mtr);
+		finished = fseg_free_step(file_seg, &mtr);
 
 		if (finished) {
 			/* Update the rseg header */
@@ -1213,7 +1213,6 @@ trx_undo_mem_create(
 	undo->top_undo_no = IB_ID_MAX;
 	undo->top_page_no = page_no;
 	undo->guess_block = NULL;
-	undo->withdraw_clock = 0;
 	ut_ad(undo->empty());
 
 	return(undo);
@@ -1402,9 +1401,7 @@ trx_undo_assign(trx_t* trx, dberr_t* err, mtr_t* mtr)
 	if (undo) {
 		return buf_page_get_gen(
 			page_id_t(undo->rseg->space->id, undo->last_page_no),
-			univ_page_size, RW_X_LATCH,
-			buf_pool_is_obsolete(undo->withdraw_clock)
-			? NULL : undo->guess_block,
+			univ_page_size, RW_X_LATCH, undo->guess_block,
 			BUF_GET, __FILE__, __LINE__, mtr, err);
 	}
 
@@ -1458,9 +1455,7 @@ trx_undo_assign_low(trx_t* trx, trx_rseg_t* rseg, trx_undo_t** undo,
 	if (*undo) {
 		return buf_page_get_gen(
 			page_id_t(rseg->space->id, (*undo)->last_page_no),
-			univ_page_size, RW_X_LATCH,
-			buf_pool_is_obsolete((*undo)->withdraw_clock)
-			? NULL : (*undo)->guess_block,
+			univ_page_size, RW_X_LATCH, (*undo)->guess_block,
 			BUF_GET, __FILE__, __LINE__, mtr, err);
 	}
 

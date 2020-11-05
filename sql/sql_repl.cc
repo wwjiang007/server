@@ -374,11 +374,15 @@ static int send_file(THD *thd)
     We need net_flush here because the client will not know it needs to send
     us the file name until it has processed the load event entry
   */
-  if (unlikely(net_flush(net) || (packet_len = my_net_read(net)) == packet_error))
+  if (unlikely(net_flush(net)))
   {
+  read_error:
     errmsg = "while reading file name";
     goto err;
   }
+  packet_len= my_net_read(net);
+  if (unlikely(packet_len == packet_error))
+    goto read_error;
 
   // terminate with \0 for fn_format
   *((char*)net->read_pos +  packet_len) = 0;
@@ -1958,7 +1962,7 @@ send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
 
   pos= my_b_tell(log);
   if (repl_semisync_master.update_sync_header(info->thd,
-                                              (uchar*) packet->c_ptr(),
+                                              (uchar*) packet->c_ptr_safe(),
                                               info->log_file_name + info->dirlen,
                                               pos, &need_sync))
   {
@@ -1982,7 +1986,8 @@ send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
     }
   }
 
-  if (need_sync && repl_semisync_master.flush_net(info->thd, packet->c_ptr()))
+  if (need_sync && repl_semisync_master.flush_net(info->thd,
+                                                  packet->c_ptr_safe()))
   {
     info->error= ER_UNKNOWN_ERROR;
     return "Failed to run hook 'after_send_event'";
@@ -2072,9 +2077,13 @@ static int init_binlog_sender(binlog_send_info *info,
     });
 
   if (global_system_variables.log_warnings > 1)
+  {
     sql_print_information(
-        "Start binlog_dump to slave_server(%lu), pos(%s, %lu)",
-        thd->variables.server_id, log_ident, (ulong)*pos);
+        "Start binlog_dump to slave_server(%lu), pos(%s, %lu), "
+        "using_gtid(%d), gtid('%s')", thd->variables.server_id,
+        log_ident, (ulong)*pos, info->using_gtid_state,
+        connect_gtid_state.c_ptr_quick());
+  }
 
 #ifndef DBUG_OFF
   if (opt_sporadic_binlog_dump_fail && (binlog_dump_count++ % 2))
@@ -3289,7 +3298,7 @@ int reset_slave(THD *thd, Master_info* mi)
   char fname[FN_REFLEN];
   int thread_mask= 0, error= 0;
   uint sql_errno=ER_UNKNOWN_ERROR;
-  const char* errmsg= "Unknown error occurred while reseting slave";
+  const char* errmsg= "Unknown error occurred while resetting slave";
   char master_info_file_tmp[FN_REFLEN];
   char relay_log_info_file_tmp[FN_REFLEN];
   DBUG_ENTER("reset_slave");
@@ -3875,7 +3884,7 @@ int reset_master(THD* thd, rpl_gtid *init_state, uint32 init_state_len,
   }
 
   bool ret= 0;
-  /* Temporarily disable master semisync before reseting master. */
+  /* Temporarily disable master semisync before resetting master. */
   repl_semisync_master.before_reset_master();
   ret= mysql_bin_log.reset_logs(thd, 1, init_state, init_state_len,
                                 next_log_number);
@@ -3897,8 +3906,14 @@ bool mysql_show_binlog_events(THD* thd)
 {
   Protocol *protocol= thd->protocol;
   List<Item> field_list;
+  char errmsg_buf[MYSYS_ERRMSG_SIZE];
   const char *errmsg = 0;
   bool ret = TRUE;
+  /*
+     Using checksum validate the correctness of event pos specified in show
+     binlog events command.
+  */
+  bool verify_checksum_once= false;
   IO_CACHE log;
   File file = -1;
   MYSQL_BIN_LOG *binary_log= NULL;
@@ -3906,6 +3921,9 @@ bool mysql_show_binlog_events(THD* thd)
   Master_info *mi= 0;
   LOG_INFO linfo;
   LEX_MASTER_INFO *lex_mi= &thd->lex->mi;
+  enum enum_binlog_checksum_alg checksum_alg;
+  my_off_t binlog_size;
+  MY_STAT s;
 
   DBUG_ENTER("mysql_show_binlog_events");
 
@@ -3977,6 +3995,17 @@ bool mysql_show_binlog_events(THD* thd)
     if ((file=open_binlog(&log, linfo.log_file_name, &errmsg)) < 0)
       goto err;
 
+    my_stat(linfo.log_file_name, &s, MYF(0));
+    binlog_size= s.st_size;
+    if (lex_mi->pos > binlog_size)
+    {
+      sprintf(errmsg_buf, "Invalid pos specified. Requested from pos:%llu is "
+              "greater than actual file size:%lu\n", lex_mi->pos,
+              (ulong)s.st_size);
+      errmsg= errmsg_buf;
+      goto err;
+    }
+
     /*
       to account binlog event header size
     */
@@ -4028,20 +4057,57 @@ bool mysql_show_binlog_events(THD* thd)
       }
     }
 
-    my_b_seek(&log, pos);
+    if (lex_mi->pos > BIN_LOG_HEADER_SIZE)
+    {
+      checksum_alg= description_event->checksum_alg;
+      /* Validate user given position using checksum */
+      if (checksum_alg != BINLOG_CHECKSUM_ALG_OFF &&
+          checksum_alg != BINLOG_CHECKSUM_ALG_UNDEF)
+      {
+        if (!opt_master_verify_checksum)
+          verify_checksum_once= true;
+        my_b_seek(&log, pos);
+      }
+      else
+      {
+        my_off_t cur_pos= my_b_tell(&log);
+        ulong next_event_len= 0;
+        uchar buff[IO_SIZE];
+        while (cur_pos < pos)
+        {
+          my_b_seek(&log, cur_pos + EVENT_LEN_OFFSET);
+          if (my_b_read(&log, (uchar *)buff, sizeof(next_event_len)))
+          {
+            mysql_mutex_unlock(log_lock);
+            errmsg = "Could not read event_length";
+            goto err;
+          }
+          next_event_len= uint4korr(buff);
+          cur_pos= cur_pos + next_event_len;
+        }
+        if (cur_pos > pos)
+        {
+          mysql_mutex_unlock(log_lock);
+          errmsg= "Invalid input pos specified please provide valid one.";
+          goto err;
+        }
+        my_b_seek(&log, cur_pos);
+      }
+    }
 
     for (event_count = 0;
          (ev = Log_event::read_log_event(&log,
                                          description_event,
-                                         opt_master_verify_checksum)); )
+                                         (opt_master_verify_checksum ||
+                                          verify_checksum_once))); )
     {
       if (event_count >= limit_start &&
-	  ev->net_send(protocol, linfo.log_file_name, pos))
+          ev->net_send(protocol, linfo.log_file_name, pos))
       {
-	errmsg = "Net error";
-	delete ev;
+        errmsg = "Net error";
+        delete ev;
         mysql_mutex_unlock(log_lock);
-	goto err;
+        goto err;
       }
 
       if (ev->get_type_code() == FORMAT_DESCRIPTION_EVENT)
@@ -4067,10 +4133,11 @@ bool mysql_show_binlog_events(THD* thd)
         delete ev;
       }
 
+      verify_checksum_once= false;
       pos = my_b_tell(&log);
 
       if (++event_count >= limit_end)
-	break;
+        break;
     }
 
     if (unlikely(event_count < limit_end && log.error))

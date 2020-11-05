@@ -2,7 +2,7 @@
 #define SQL_SELECT_INCLUDED
 
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2017, MariaDB Corporation.
+   Copyright (c) 2008, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -655,6 +655,8 @@ typedef struct st_join_table {
   bool use_order() const; ///< Use ordering provided by chosen index?
   bool sort_table();
   bool remove_duplicates();
+
+  void partial_cleanup();
   void add_keyuses_for_splitting();
   SplM_plan_info *choose_best_splitting(double record_count,
                                         table_map remaining_tables);
@@ -1103,6 +1105,7 @@ protected:
                                Join_plan_state *save_to);
   /* Choose a subquery plan for a table-less subquery. */
   bool choose_tableless_subquery_plan();
+  void handle_implicit_grouping_with_window_funcs();
 
 public:
   void save_query_plan(Join_plan_state *save_to);
@@ -1632,6 +1635,9 @@ public:
   void copy_ref_ptr_array(Ref_ptr_array dst_arr, Ref_ptr_array src_arr)
   {
     DBUG_ASSERT(dst_arr.size() >= src_arr.size());
+    if (src_arr.size() == 0)
+      return;
+
     void *dest= dst_arr.array();
     const void *src= src_arr.array();
     memcpy(dest, src, src_arr.size() * src_arr.element_size());
@@ -1711,6 +1717,7 @@ public:
     - We are using an ORDER BY or GROUP BY on fields not in the first table
     - We are using different ORDER BY and GROUP BY orders
     - The user wants us to buffer the result.
+    - We are using WINDOW functions.
     When the WITH ROLLUP modifier is present, we cannot skip temporary table
     creation for the DISTINCT clause just because there are only const tables.
   */
@@ -1720,7 +1727,8 @@ public:
 	    ((select_distinct || !simple_order || !simple_group) ||
 	     (group_list && order) ||
              MY_TEST(select_options & OPTION_BUFFER_RESULT))) ||
-            (rollup.state != ROLLUP::STATE_NONE && select_distinct));
+            (rollup.state != ROLLUP::STATE_NONE && select_distinct) ||
+            select_lex->have_window_funcs());
   }
   bool choose_subquery_plan(table_map join_tables);
   void get_partial_cost_and_fanout(int end_tab_idx,

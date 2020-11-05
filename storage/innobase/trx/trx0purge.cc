@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -191,7 +191,7 @@ void purge_sys_t::close()
   ut_ad(!trx->id);
   ut_ad(trx->state == TRX_STATE_ACTIVE);
   trx->state= TRX_STATE_NOT_STARTED;
-  trx_free(trx);
+  trx->free();
   rw_lock_free(&latch);
   mutex_free(&pq_mutex);
   os_event_destroy(event);
@@ -365,7 +365,7 @@ trx_purge_free_segment(trx_rseg_t* rseg, fil_addr_t hdr_addr)
 
 	while (!fseg_free_step_not_header(
 		       TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER
-		       + undo_page, false, &mtr)) {
+		       + undo_page, &mtr)) {
 		mutex_exit(&rseg->mutex);
 
 		mtr.commit();
@@ -401,7 +401,7 @@ trx_purge_free_segment(trx_rseg_t* rseg, fil_addr_t hdr_addr)
 		fsp0fsp.cc. */
 
 	} while (!fseg_free_step(TRX_UNDO_SEG_HDR + TRX_UNDO_FSEG_HEADER
-				 + undo_page, false, &mtr));
+				 + undo_page, &mtr));
 
 	const ulint hist_size = mach_read_from_4(rseg_hdr
 						 + TRX_RSEG_HISTORY_SIZE);
@@ -677,12 +677,11 @@ namespace undo {
 
 			os_file_close(handle);
 
-			if (err != DB_SUCCESS) {
-
+			if (UNIV_UNLIKELY(err != DB_SUCCESS)) {
 				ib::info()
 					<< "Unable to read '"
 					<< log_file_name << "' : "
-					<< ut_strerr(err);
+					<< err;
 
 				os_file_delete(
 					innodb_log_file_key, log_file_name);
@@ -1031,13 +1030,13 @@ not_found:
 	/* This is only executed by the srv_purge_coordinator_thread. */
 	export_vars.innodb_undo_truncations++;
 
-	/* TODO: PUNCH_HOLE the garbage (with write-ahead logging) */
+	/* In MDEV-8319 (10.5) we will PUNCH_HOLE the garbage
+	(with write-ahead logging). */
 
 	mutex_enter(&fil_system.mutex);
-	ut_ad(space->stop_new_ops);
 	ut_ad(space->is_being_truncated);
-	space->stop_new_ops = false;
 	space->is_being_truncated = false;
+	space->set_stopping(false);
 	mutex_exit(&fil_system.mutex);
 
 	if (purge_sys.rseg != NULL

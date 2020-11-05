@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2002, 2011, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2015, MariaDB
+   Copyright (c) 2010, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -692,12 +692,34 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
   {
     /*
        System versioned tables may still require to get versioning conditions
-       (when updating view). See vers_setup_conds().
+       when modifying view (see vers_setup_conds()). Only UPDATE and DELETE are
+       affected because they use WHERE condition.
     */
     if (!unit->prepared &&
         derived->table->versioned() &&
-        (res= unit->prepare(derived, derived->derived_result, 0)))
-      goto exit;
+        derived->merge_underlying_list &&
+        /* choose only those merged views that do not select from other views */
+        !derived->merge_underlying_list->merge_underlying_list)
+    {
+      switch (thd->lex->sql_command)
+      {
+      case SQLCOM_DELETE:
+      case SQLCOM_DELETE_MULTI:
+      case SQLCOM_UPDATE:
+      case SQLCOM_UPDATE_MULTI:
+        if ((res= first_select->vers_setup_conds(thd,
+                                                 derived->merge_underlying_list)))
+          goto exit;
+        if (derived->merge_underlying_list->where)
+        {
+          Query_arena_stmt on_stmt_arena(thd);
+          derived->where= and_items(thd, derived->where,
+                                    derived->merge_underlying_list->where);
+        }
+      default:
+        break;
+      }
+    }
     DBUG_RETURN(FALSE);
   }
 
@@ -817,7 +839,7 @@ exit:
   {
     if (!derived->is_with_table_recursive_reference())
     {
-      if (derived->table)
+      if (derived->table && derived->table->s->tmp_table)
         free_tmp_table(thd, derived->table);
       delete derived->derived_result;
     }
@@ -1088,7 +1110,6 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
   DBUG_ASSERT(derived->table && derived->table->is_created());
   select_unit *derived_result= derived->derived_result;
   SELECT_LEX *save_current_select= lex->current_select;
-  bool derived_recursive_is_filled= false;
 
   if (unit->executed && !derived_is_recursive &&
       (unit->uncacheable & UNCACHEABLE_DEPENDENT))
@@ -1117,7 +1138,6 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
     {
       /* In this case all iteration are performed */
       res= derived->fill_recursive(thd);
-      derived_recursive_is_filled= true;
     }
   }
   else if (unit->is_unit_op())
@@ -1173,8 +1193,7 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
     }
   }
 err:
-  if (res || (!lex->describe && !unit->uncacheable &&
-              (!derived_is_recursive || derived_recursive_is_filled)))
+  if (res || (!derived_is_recursive && !lex->describe && !unit->uncacheable))
     unit->cleanup();
   lex->current_select= save_current_select;
 

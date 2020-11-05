@@ -1646,6 +1646,8 @@ static int last_uniq_key(TABLE *table,uint keynr)
 int vers_insert_history_row(TABLE *table)
 {
   DBUG_ASSERT(table->versioned(VERS_TIMESTAMP));
+  if (!table->vers_write)
+    return 0;
   restore_record(table,record[1]);
 
   // Set Sys_end to now()
@@ -1655,6 +1657,10 @@ int vers_insert_history_row(TABLE *table)
   Field *row_end= table->vers_end_field();
   if (row_start->cmp(row_start->ptr, row_end->ptr) >= 0)
     return 0;
+
+  if (table->vfield &&
+      table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_READ))
+    return HA_ERR_GENERIC;
 
   return table->file->ha_write_row(table->record[0]);
 }
@@ -1787,15 +1793,13 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
       }
       if (table->vfield)
       {
-        my_bool abort_on_warning= thd->abort_on_warning;
         /*
           We have not yet called update_virtual_fields(VOL_UPDATE_FOR_READ)
           in handler methods for the just read row in record[1].
         */
         table->move_fields(table->field, table->record[1], table->record[0]);
-        thd->abort_on_warning= 0;
-        table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_REPLACE);
-        thd->abort_on_warning= abort_on_warning;
+        if (table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_REPLACE))
+          goto err;
         table->move_fields(table->field, table->record[0], table->record[1]);
       }
       if (info->handle_duplicates == DUP_UPDATE)
@@ -2113,11 +2117,15 @@ public:
   ulong auto_increment_offset;
   LEX_STRING query;
   Time_zone *time_zone;
+  char *user, *host, *ip;
+  query_id_t query_id;
+  my_thread_id thread_id;
 
   delayed_row(LEX_STRING const query_arg, enum_duplicates dup_arg,
               bool ignore_arg, bool log_query_arg)
     : record(0), dup(dup_arg), ignore(ignore_arg), log_query(log_query_arg),
-      forced_insert_id(0), query(query_arg), time_zone(0)
+      forced_insert_id(0), query(query_arg), time_zone(0),
+      user(0), host(0), ip(0)
     {}
   ~delayed_row()
   {
@@ -2165,7 +2173,6 @@ public:
     passed from connection thread to the handler thread.
   */
   MDL_request grl_protection;
-
   Delayed_insert(SELECT_LEX *current_select)
     :locks_in_memory(0), thd(next_thread_id()),
      table(0),tables_in_use(0), stacked_inserts(0),
@@ -2174,6 +2181,8 @@ public:
     DBUG_ENTER("Delayed_insert constructor");
     thd.security_ctx->user=(char*) delayed_user;
     thd.security_ctx->host=(char*) my_localhost;
+    thd.security_ctx->ip= NULL;
+    thd.query_id= 0;
     strmake_buf(thd.security_ctx->priv_user, thd.security_ctx->user);
     thd.current_tablenr=0;
     thd.set_command(COM_DELAYED_INSERT);
@@ -2603,6 +2612,7 @@ TABLE *Delayed_insert::get_local_table(THD* client_thd)
     if (!(*field= (*org_field)->make_new_field(client_thd->mem_root, copy, 1)))
       goto error;
     (*field)->unireg_check= (*org_field)->unireg_check;
+    (*field)->invisible= (*org_field)->invisible;
     (*field)->orig_table= copy;			// Remove connection
     (*field)->move_field_offset(adjust_ptrs);	// Point at copy->record[0]
     memdup_vcol(client_thd, (*field)->vcol_info);
@@ -2680,6 +2690,7 @@ int write_delayed(THD *thd, TABLE *table, enum_duplicates duplic,
   delayed_row *row= 0;
   Delayed_insert *di=thd->di;
   const Discrete_interval *forced_auto_inc;
+  size_t user_len, host_len, ip_len;
   DBUG_ENTER("write_delayed");
   DBUG_PRINT("enter", ("query = '%s' length %lu", query.str,
                        (ulong) query.length));
@@ -2713,11 +2724,45 @@ int write_delayed(THD *thd, TABLE *table, enum_duplicates duplic,
     goto err;
   }
 
+  user_len= host_len= ip_len= 0;
+  row->user= row->host= row->ip= NULL;
+  if (thd->security_ctx)
+  {
+    if (thd->security_ctx->user)
+      user_len= strlen(thd->security_ctx->user) + 1;
+    if (thd->security_ctx->host)
+      host_len= strlen(thd->security_ctx->host) + 1;
+    if (thd->security_ctx->ip)
+      ip_len= strlen(thd->security_ctx->ip) + 1;
+  }
   /* This can't be THREAD_SPECIFIC as it's freed in delayed thread */
-  if (!(row->record= (char*) my_malloc(table->s->reclength,
+  if (!(row->record= (char*) my_malloc(table->s->reclength +
+                                       user_len + host_len + ip_len,
                                        MYF(MY_WME))))
     goto err;
   memcpy(row->record, table->record[0], table->s->reclength);
+
+  if (thd->security_ctx)
+  {
+    if (thd->security_ctx->user)
+    {
+      row->user= row->record + table->s->reclength;
+      memcpy(row->user, thd->security_ctx->user, user_len);
+    }
+    if (thd->security_ctx->host)
+    {
+      row->host= row->record + table->s->reclength + user_len;
+      memcpy(row->host, thd->security_ctx->host, host_len);
+    }
+    if (thd->security_ctx->ip)
+    {
+      row->ip= row->record + table->s->reclength + user_len + host_len;
+      memcpy(row->ip, thd->security_ctx->ip, ip_len);
+    }
+  }
+  row->query_id= thd->query_id;
+  row->thread_id= thd->thread_id;
+
   row->start_time=                thd->start_time;
   row->start_time_sec_part=       thd->start_time_sec_part;
   row->query_start_sec_part_used= thd->query_start_sec_part_used;
@@ -3135,6 +3180,20 @@ pthread_handler_t handle_delayed_insert(void *arg)
       }
       if (di->stacked_inserts)
       {
+        delayed_row *row;
+        I_List_iterator<delayed_row> it(di->rows);
+        my_thread_id cur_thd= di->thd.thread_id;
+
+        while ((row= it++))
+        {
+          if (cur_thd != row->thread_id)
+          {
+            mysql_audit_external_lock_ex(&di->thd, row->thread_id,
+                row->user, row->host, row->ip, row->query_id,
+                di->table->s, F_WRLCK);
+            cur_thd= row->thread_id;
+          }
+        }
         if (di->handle_inserts())
         {
           /* Some fatal error */

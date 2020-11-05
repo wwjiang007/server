@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2018, MariaDB Corporation
+   Copyright (c) 2010, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -96,6 +96,15 @@ void item_init(void)
 {
   item_func_sleep_init();
   uuid_short_init();
+}
+
+
+void Item::raise_error_not_evaluable()
+{
+  Item::Print tmp(this, QT_ORDINARY);
+  // TODO-10.5: add an error message to errmsg-utf8.txt
+  my_printf_error(ER_UNKNOWN_ERROR,
+                  "'%s' is not allowed in this context", MYF(0), tmp.ptr());
 }
 
 
@@ -1534,7 +1543,7 @@ bool Item::get_date_from_string(MYSQL_TIME *ltime, ulonglong fuzzydate)
 bool Item::make_zero_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
 {
   /*
-    if the item was not null and convertion failed, we return a zero date
+    if the item was not null and conversion failed, we return a zero date
     if allowed, otherwise - null.
   */
   bzero((char*) ltime,sizeof(*ltime));
@@ -2727,22 +2736,13 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
   bool res= FALSE;
   uint i;
 
-  /*
-    In case we're in statement prepare, create conversion item
-    in its memory: it will be reused on each execute.
-  */
-  Query_arena backup;
-  Query_arena *arena= thd->stmt_arena->is_stmt_prepare() ?
-                      thd->activate_stmt_arena_if_needed(&backup) :
-                      NULL;
+  DBUG_ASSERT(!thd->stmt_arena->is_stmt_prepare());
 
   for (i= 0, arg= args; i < nargs; i++, arg+= item_sep)
   {
     Item* conv= (*arg)->safe_charset_converter(thd, coll.collation);
     if (conv == *arg)
       continue;
-    if (!conv && ((*arg)->collation.repertoire == MY_REPERTOIRE_ASCII))
-      conv= new (thd->mem_root) Item_func_conv_charset(thd, *arg, coll.collation, 1);
 
     if (!conv)
     {
@@ -2756,20 +2756,8 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
       res= TRUE;
       break; // we cannot return here, we need to restore "arena".
     }
-    /*
-      If in statement prepare, then we create a converter for two
-      constant items, do it once and then reuse it.
-      If we're in execution of a prepared statement, arena is NULL,
-      and the conv was created in runtime memory. This can be
-      the case only if the argument is a parameter marker ('?'),
-      because for all true constants the charset converter has already
-      been created in prepare. In this case register the change for
-      rollback.
-    */
-    if (thd->stmt_arena->is_stmt_prepare())
-      *arg= conv;
-    else
-      thd->change_item_tree(arg, conv);
+
+    thd->change_item_tree(arg, conv);
 
     if (conv->fix_fields(thd, arg))
     {
@@ -2777,8 +2765,6 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
       break; // we cannot return here, we need to restore "arena".
     }
   }
-  if (arena)
-    thd->restore_active_arena(arena, &backup);
   return res;
 }
 
@@ -2786,42 +2772,46 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
 /**
   @brief
     Building clone for Item_func_or_sum
-    
+
   @param thd        thread handle
-  @param mem_root   part of the memory for the clone   
+  @param mem_root   part of the memory for the clone
 
   @details
-    This method gets copy of the current item and also 
-    build clones for its referencies. For the referencies 
-    build_copy is called again.
-      
-   @retval
-     clone of the item
-     0 if an error occured
-*/ 
+    This method first builds clones of the arguments. If it is successful with
+    buiding the clones then it constructs a copy of this Item_func_or_sum object
+    and attaches to it the built clones of the arguments.
+
+   @return clone of the item
+   @retval 0 on a failure
+*/
 
 Item* Item_func_or_sum::build_clone(THD *thd)
 {
-  Item_func_or_sum *copy= (Item_func_or_sum *) get_copy(thd);
-  if (unlikely(!copy))
-    return 0;
+  Item *copy_tmp_args[2]= {0,0};
+  Item **copy_args= copy_tmp_args;
   if (arg_count > 2)
   {
-    copy->args= 
-      (Item**) alloc_root(thd->mem_root, sizeof(Item*) * arg_count);
-    if (unlikely(!copy->args))
+    copy_args= static_cast<Item**>
+      (alloc_root(thd->mem_root, sizeof(Item*) * arg_count));
+    if (unlikely(!copy_args))
       return 0;
   }
-  else if (arg_count > 0)
-    copy->args= copy->tmp_arg;
-
-   
   for (uint i= 0; i < arg_count; i++)
   {
     Item *arg_clone= args[i]->build_clone(thd);
-    if (!arg_clone)
+    if (unlikely(!arg_clone))
       return 0;
-    copy->args[i]= arg_clone;
+    copy_args[i]= arg_clone;
+  }
+  Item_func_or_sum *copy= static_cast<Item_func_or_sum *>(get_copy(thd));
+  if (unlikely(!copy))
+    return 0;
+  if (arg_count > 2)
+    copy->args= copy_args;
+  else if (arg_count > 0)
+  {
+    copy->args= copy->tmp_arg;
+    memcpy(copy->args, copy_args, sizeof(Item *) * arg_count);
   }
   return copy;
 }
@@ -3097,7 +3087,7 @@ Item_sp::init_result_field(THD *thd, uint max_length, uint maybe_null,
       
    @retval
      clone of the item
-     0 if an error occured
+     0 if an error occurred
 */ 
 
 Item* Item_ref::build_clone(THD *thd)
@@ -3461,12 +3451,13 @@ bool Item_field::get_date(MYSQL_TIME *ltime,ulonglong fuzzydate)
 
 bool Item_field::get_date_result(MYSQL_TIME *ltime, ulonglong fuzzydate)
 {
-  if (result_field->is_null() || result_field->get_date(ltime,fuzzydate))
+  if ((null_value= result_field->is_null()) ||
+      result_field->get_date(ltime, fuzzydate))
   {
     bzero((char*) ltime,sizeof(*ltime));
-    return (null_value= 1);
+    return true;
   }
-  return (null_value= 0);
+  return false;
 }
 
 
@@ -4316,7 +4307,7 @@ void Item_param::set_time(MYSQL_TIME *tm, timestamp_type time_type,
   {
     ErrConvTime str(&value.time);
     make_truncated_value_warning(current_thd, Sql_condition::WARN_LEVEL_WARN,
-                                 &str, time_type, 0, 0);
+                                 &str, time_type, NULL, NULL, NULL);
     set_zero_time(&value.time, time_type);
   }
   maybe_null= 0;
@@ -4539,6 +4530,23 @@ int Item_param::save_in_field(Field *field, bool no_conversions)
   }
   DBUG_ASSERT(0); // Garbage
   return 1;
+}
+
+
+bool Item_param::is_evaluable_expression() const
+{
+  switch (state) {
+  case SHORT_DATA_VALUE:
+  case LONG_DATA_VALUE:
+  case NULL_VALUE:
+    return true;
+  case NO_VALUE:
+    return true; // Not assigned yet, so we don't know
+  case IGNORE_VALUE:
+  case DEFAULT_VALUE:
+    break;
+  }
+  return false;
 }
 
 
@@ -5322,7 +5330,7 @@ static bool mark_as_dependent(THD *thd, SELECT_LEX *last, SELECT_LEX *current,
 
   @note
     We have to mark all items between current_sel (including) and
-    last_select (excluding) as dependend (select before last_select should
+    last_select (excluding) as dependent (select before last_select should
     be marked with actual table mask used by resolved item, all other with
     OUTER_REF_TABLE_BIT) and also write dependence information to Item of
     resolved identifier.
@@ -5698,7 +5706,7 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
   bool upward_lookup= FALSE;
   TABLE_LIST *table_list;
 
-  /* Calulate the TABLE_LIST for the table */
+  /* Calculate the TABLE_LIST for the table */
   table_list= (cached_table ? cached_table :
                field_found && (*from_field) != view_ref_found ?
                (*from_field)->table->pos_in_table_list : 0);
@@ -6434,7 +6442,7 @@ Item *Item_field::propagate_equal_fields(THD *thd,
       but failed to create a valid DATE literal from the given string literal.
 
       Do not do constant propagation in such cases and unlink
-      "this" from the found Item_equal (as this equality not usefull).
+      "this" from the found Item_equal (as this equality not useful).
     */
     item_equal= NULL;
     return this;
@@ -7135,8 +7143,8 @@ Item_float::Item_float(THD *thd, const char *str_arg, size_t length):
                     &error);
   if (unlikely(error))
   {
-    char tmp[NAME_LEN + 1];
-    my_snprintf(tmp, sizeof(tmp), "%.*s", (int)length, str_arg);
+    char tmp[NAME_LEN + 2];
+    my_snprintf(tmp, sizeof(tmp), "%.*s", static_cast<int>(length), str_arg);
     my_error(ER_ILLEGAL_VALUE_FOR_TYPE, MYF(0), "double", tmp);
   }
   presentation= name.str= str_arg;
@@ -7606,7 +7614,6 @@ Item *find_producing_item(Item *item, st_select_lex *sel)
   DBUG_ASSERT(item->type() == Item::FIELD_ITEM ||
               (item->type() == Item::REF_ITEM &&
                ((Item_ref *) item)->ref_type() == Item_ref::VIEW_REF)); 
-  Item *producing_item;
   Item_field *field_item= NULL;
   Item_equal *item_equal= item->get_item_equal();
   table_map tab_map= sel->master_unit()->derived->table->map;
@@ -7628,6 +7635,7 @@ Item *find_producing_item(Item *item, st_select_lex *sel)
   List_iterator_fast<Item> li(sel->item_list);
   if (field_item)
   {
+    Item *producing_item= NULL;
     uint field_no= field_item->field->field_index;
     for (uint i= 0; i <= field_no; i++)
       producing_item= li++;
@@ -8009,7 +8017,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
               /*
                 Due to cache, find_field_in_tables() can return field which
                 doesn't belong to provided outer_context. In this case we have
-                to find proper field context in order to fix field correcly.
+                to find proper field context in order to fix field correctly.
               */
               do
               {
@@ -8194,9 +8202,9 @@ Item* Item_ref::transform(THD *thd, Item_transformer transformer, uchar *arg)
   callback functions.
 
   First the function applies the analyzer to the Item_ref object. Then
-  if the analizer succeeeds we first applies the compile method to the
+  if the analyzer succeeds we first apply the compile method to the
   object the Item_ref object is referencing. If this returns a new
-  item the old item is substituted for a new one.  After this the
+  item the old item is substituted for a new one. After this the
   transformer is applied to the Item_ref object itself.
   The compile function is not called if the analyzer returns NULL
   in the parameter arg_p. 
@@ -8404,7 +8412,7 @@ bool Item_ref::get_date(MYSQL_TIME *ltime,ulonglong fuzzydate)
 longlong Item_ref::val_datetime_packed()
 {
   DBUG_ASSERT(fixed);
-  longlong tmp= (*ref)->val_datetime_packed();
+  longlong tmp= (*ref)->val_datetime_packed_result();
   null_value= (*ref)->null_value;
   return tmp;
 }
@@ -8413,7 +8421,7 @@ longlong Item_ref::val_datetime_packed()
 longlong Item_ref::val_time_packed()
 {
   DBUG_ASSERT(fixed);
-  longlong tmp= (*ref)->val_time_packed();
+  longlong tmp= (*ref)->val_time_packed_result();
   null_value= (*ref)->null_value;
   return tmp;
 }
@@ -9250,6 +9258,46 @@ bool Item_direct_view_ref::excl_dep_on_grouping_fields(st_select_lex *sel)
 }
 
 
+double Item_direct_view_ref::val_result()
+{
+  double tmp=(*ref)->val_result();
+  null_value=(*ref)->null_value;
+  return tmp;
+}
+
+
+longlong Item_direct_view_ref::val_int_result()
+{
+  longlong tmp=(*ref)->val_int_result();
+  null_value=(*ref)->null_value;
+  return tmp;
+}
+
+
+String *Item_direct_view_ref::str_result(String* tmp)
+{
+  tmp=(*ref)->str_result(tmp);
+  null_value=(*ref)->null_value;
+  return tmp;
+}
+
+
+my_decimal *Item_direct_view_ref::val_decimal_result(my_decimal *val)
+{
+  my_decimal *tmp= (*ref)->val_decimal_result(val);
+  null_value=(*ref)->null_value;
+  return tmp;
+}
+
+
+bool Item_direct_view_ref::val_bool_result()
+{
+  bool tmp= (*ref)->val_bool_result();
+  null_value=(*ref)->null_value;
+  return tmp;
+}
+
+
 bool Item_default_value::eq(const Item *item, bool binary_cmp) const
 {
   return item->type() == DEFAULT_VALUE_ITEM && 
@@ -9263,12 +9311,7 @@ bool Item_default_value::fix_fields(THD *thd, Item **items)
   Item_field *field_arg;
   Field *def_field;
   DBUG_ASSERT(fixed == 0);
-
-  if (!arg)
-  {
-    fixed= 1;
-    return FALSE;
-  }
+  DBUG_ASSERT(arg);
 
   /*
     DEFAULT() do not need table field so should not ask handler to bring
@@ -9304,8 +9347,10 @@ bool Item_default_value::fix_fields(THD *thd, Item **items)
   }
   if (!(def_field= (Field*) thd->alloc(field_arg->field->size_of())))
     goto error;
+  cached_field= def_field;
   memcpy((void *)def_field, (void *)field_arg->field,
          field_arg->field->size_of());
+  def_field->reset_fields();
   // If non-constant default value expression
   if (def_field->default_value && def_field->default_value->flags)
   {
@@ -9333,14 +9378,16 @@ error:
   return TRUE;
 }
 
+void Item_default_value::cleanup()
+{
+  delete cached_field;                        // Free cached blob data
+  cached_field= 0;
+  Item_field::cleanup();
+}
 
 void Item_default_value::print(String *str, enum_query_type query_type)
 {
-  if (!arg)
-  {
-    str->append(STRING_WITH_LEN("default"));
-    return;
-  }
+  DBUG_ASSERT(arg);
   str->append(STRING_WITH_LEN("default("));
   /*
     We take DEFAULT from a field so do not need it value in case of const
@@ -9354,6 +9401,7 @@ void Item_default_value::print(String *str, enum_query_type query_type)
 
 void Item_default_value::calculate()
 {
+  DBUG_ASSERT(arg);
   if (field->default_value)
     field->set_default();
   DEBUG_SYNC(field->table->in_use, "after_Item_default_value_calculate");
@@ -9397,14 +9445,8 @@ bool Item_default_value::send(Protocol *protocol, st_value *buffer)
 
 int Item_default_value::save_in_field(Field *field_arg, bool no_conversions)
 {
-  if (arg)
-  {
-    calculate();
-    return Item_field::save_in_field(field_arg, no_conversions);
-  }
-
-  return field_arg->save_in_field_default_value(context->error_processor ==
-                                                &view_error_processor);
+  calculate();
+  return Item_field::save_in_field(field_arg, no_conversions);
 }
 
 table_map Item_default_value::used_tables() const
@@ -9425,13 +9467,7 @@ Item *Item_default_value::transform(THD *thd, Item_transformer transformer,
                                     uchar *args)
 {
   DBUG_ASSERT(!thd->stmt_arena->is_stmt_prepare());
-
-  /*
-    If the value of arg is NULL, then this object represents a constant,
-    so further transformation is unnecessary (and impossible).
-  */
-  if (!arg)
-    return 0;
+  DBUG_ASSERT(arg);
 
   Item *new_item= arg->transform(thd, transformer, args);
   if (!new_item)
@@ -9448,57 +9484,6 @@ Item *Item_default_value::transform(THD *thd, Item_transformer transformer,
   return (this->*transformer)(thd, args);
 }
 
-void Item_ignore_value::print(String *str, enum_query_type query_type)
-{
-    str->append(STRING_WITH_LEN("ignore"));
-}
-
-int Item_ignore_value::save_in_field(Field *field_arg, bool no_conversions)
-{
-  return field_arg->save_in_field_ignore_value(context->error_processor ==
-                                               &view_error_processor);
-}
-
-String *Item_ignore_value::val_str(String *str)
-{
-  DBUG_ASSERT(0); // never should be called
-  null_value= 1;
-  return 0;
-}
-
-double Item_ignore_value::val_real()
-{
-  DBUG_ASSERT(0); // never should be called
-  null_value= 1;
-  return 0.0;
-}
-
-longlong Item_ignore_value::val_int()
-{
-  DBUG_ASSERT(0); // never should be called
-  null_value= 1;
-  return 0;
-}
-
-my_decimal *Item_ignore_value::val_decimal(my_decimal *decimal_value)
-{
-  DBUG_ASSERT(0); // never should be called
-  null_value= 1;
-  return 0;
-}
-
-bool Item_ignore_value::get_date(MYSQL_TIME *ltime, ulonglong fuzzydate)
-{
-  DBUG_ASSERT(0); // never should be called
-  null_value= 1;
-  return TRUE;
-}
-
-bool Item_ignore_value::send(Protocol *protocol, st_value *buffer)
-{
-  DBUG_ASSERT(0); // never should be called
-  return TRUE;
-}
 
 bool Item_insert_value::eq(const Item *item, bool binary_cmp) const
 {
@@ -10318,6 +10303,8 @@ bool Item_cache_str::cache_value()
     value_buff.copy(*value);
     value= &value_buff;
   }
+  else
+    value_buff.copy();
   return TRUE;
 }
 

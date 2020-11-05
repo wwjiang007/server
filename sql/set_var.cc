@@ -973,8 +973,17 @@ int set_var_default_role::check(THD *thd)
 {
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
   real_user= get_current_user(thd, user);
-  int status= acl_check_set_default_role(thd, real_user->host.str, real_user->user.str);
-  return status;
+  real_role= role.str;
+  if (role.str == current_role.str)
+  {
+    if (!thd->security_ctx->priv_role[0])
+      real_role= "NONE";
+    else
+      real_role= thd->security_ctx->priv_role;
+  }
+
+  return acl_check_set_default_role(thd, real_user->host.str,
+                                    real_user->user.str, real_role);
 #else
   return 0;
 #endif
@@ -985,7 +994,8 @@ int set_var_default_role::update(THD *thd)
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
   Reprepare_observer *save_reprepare_observer= thd->m_reprepare_observer;
   thd->m_reprepare_observer= 0;
-  int res= acl_set_default_role(thd, real_user->host.str, real_user->user.str, role.str);
+  int res= acl_set_default_role(thd, real_user->host.str, real_user->user.str,
+                                real_role);
   thd->m_reprepare_observer= save_reprepare_observer;
   return res;
 #else
@@ -1058,7 +1068,6 @@ static void store_var(Field *field, sys_var *var, enum_var_type scope,
 int fill_sysvars(THD *thd, TABLE_LIST *tables, COND *cond)
 {
   char name_buffer[NAME_CHAR_LEN];
-  enum_check_fields save_count_cuted_fields= thd->count_cuted_fields;
   bool res= 1;
   CHARSET_INFO *scs= system_charset_info;
   StringBuffer<STRING_BUFFER_USUAL_SIZE> strbuf(scs);
@@ -1068,7 +1077,6 @@ int fill_sysvars(THD *thd, TABLE_LIST *tables, COND *cond)
   DBUG_ASSERT(tables->table->in_use == thd);
 
   cond= make_cond_for_info_schema(thd, cond, tables);
-  thd->count_cuted_fields= CHECK_FIELD_WARN;
   mysql_prlock_rdlock(&LOCK_system_variables_hash);
 
   for (uint i= 0; i < system_variable_hash.records; i++)
@@ -1233,7 +1241,6 @@ int fill_sysvars(THD *thd, TABLE_LIST *tables, COND *cond)
   res= 0;
 end:
   mysql_prlock_unlock(&LOCK_system_variables_hash);
-  thd->count_cuted_fields= save_count_cuted_fields;
   return res;
 }
 

@@ -3,7 +3,7 @@
 /* -------------                                                       */
 /*  Version 3.0                                                        */
 /*                                                                     */
-/*  Author Olivier BERTRAND          2007 - 2017                       */
+/*  Author Olivier BERTRAND          2007 - 2020                       */
 /*                                                                     */
 /*  This program are the XML tables classes using MS-DOM or libxml2.   */
 /***********************************************************************/
@@ -61,6 +61,8 @@ extern "C" char version[];
 
 #define TYPE_UNKNOWN     12        /* Must be greater than other types */
 #define XLEN(M)  sizeof(M) - strlen(M) - 1	       /* To avoid overflow*/
+
+int GetDefaultDepth(void);
 
 /***********************************************************************/
 /* Class and structure used by XMLColumns.                             */
@@ -149,8 +151,9 @@ PQRYRES XMLColumns(PGLOBAL g, char *db, char *tab, PTOS topt, bool info)
     strcpy(g->Message, MSG(MISSING_FNAME));
     return NULL;
   } else {
-    lvl = GetIntegerTableOption(g, topt, "Level", 0);
-    lvl = (lvl < 0) ? 0 : (lvl > 16) ? 16 : lvl;
+    lvl = GetIntegerTableOption(g, topt, "Level", GetDefaultDepth());
+		lvl = GetIntegerTableOption(g, topt, "Depth", lvl);
+		lvl = (lvl < 0) ? 0 : (lvl > 16) ? 16 : lvl;
   } // endif fn
 
   if (trace(1))
@@ -240,7 +243,9 @@ PQRYRES XMLColumns(PGLOBAL g, char *db, char *tab, PTOS topt, bool info)
 
      more:
       if (vp->atp) {
-        strncpy(colname, vp->atp->GetName(g), sizeof(colname));
+				size_t z = sizeof(colname) - 1;
+        strncpy(colname, vp->atp->GetName(g), z);
+				colname[z] = 0;
 				strncat(xcol->Name, colname, XLEN(xcol->Name));
 
         switch (vp->atp->GetText(g, buf, sizeof(buf))) {
@@ -811,12 +816,15 @@ bool TDBXML::Initialize(PGLOBAL g)
   if (Void)
     return false;
 
-  if (Columns && !Bufdone) {
+  if (Columns) {
     // Allocate the buffers that will contain node values
     for (colp = (PXMLCOL)Columns; colp; colp = (PXMLCOL)colp->GetNext())
-      if (!colp->IsSpecial())            // Not a pseudo column
-        if (colp->AllocBuf(g, Mode == MODE_INSERT))
-          return true;
+			if (!colp->IsSpecial()) {            // Not a pseudo column
+				if (!Bufdone && colp->AllocBuf(g, Mode == MODE_INSERT))
+					return true;
+
+				colp->Nx = colp->Sx = -1;
+			} // endif Special
 
     Bufdone = true;
     } // endif Bufdone

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2019, MariaDB Corporation.
+Copyright (c) 2015, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -68,27 +68,18 @@ trx_get_error_info(
 /*===============*/
 	const trx_t*	trx);	/*!< in: trx object */
 
-/** @return a trx_t instance from trx_pools. */
+/** @return an allocated transaction */
 trx_t *trx_create();
 
-/**
-  Release a trx_t instance back to the pool.
-  @param trx the instance to release.
-*/
-void trx_free(trx_t*& trx);
-
 /** At shutdown, frees a transaction object. */
-void
-trx_free_at_shutdown(trx_t *trx);
+void trx_free_at_shutdown(trx_t *trx);
 
 /** Disconnect a prepared transaction from MySQL.
 @param[in,out]	trx	transaction */
-void
-trx_disconnect_prepared(trx_t*	trx);
+void trx_disconnect_prepared(trx_t *trx);
 
 /** Initialize (resurrect) transactions at startup. */
-void
-trx_lists_init_at_db_start();
+void trx_lists_init_at_db_start();
 
 /*************************************************************//**
 Starts the transaction if it is not yet started. */
@@ -342,13 +333,6 @@ bool
 trx_is_interrupted(
 /*===============*/
 	const trx_t*	trx);	/*!< in: transaction */
-/**********************************************************************//**
-Determines if the currently running transaction is in strict mode.
-@return TRUE if strict */
-ibool
-trx_is_strict(
-/*==========*/
-	trx_t*	trx);	/*!< in: transaction */
 
 /*******************************************************************//**
 Calculates the "weight" of a transaction. The weight of one transaction
@@ -461,6 +445,7 @@ Check transaction state */
 	ut_ad(!(t)->id);						\
 	ut_ad(!(t)->has_logged());					\
 	ut_ad(!(t)->is_referenced());					\
+	ut_ad(!(t)->is_wsrep());					\
 	ut_ad(!(t)->read_view.is_open());				\
 	ut_ad((t)->lock.wait_thr == NULL);				\
 	ut_ad(UT_LIST_GET_LEN((t)->lock.trx_locks) == 0);		\
@@ -468,14 +453,6 @@ Check transaction state */
 	ut_ad(!(t)->autoinc_locks					\
 	      || ib_vector_is_empty((t)->autoinc_locks));		\
 	ut_ad((t)->dict_operation == TRX_DICT_OP_NONE);			\
-} while(0)
-
-/** Check if transaction is in-active so that it can be freed and put back to
-transaction pool.
-@param t transaction handle */
-#define assert_trx_is_inactive(t) do {					\
-	assert_trx_is_free((t));					\
-	ut_ad((t)->dict_operation_lock_mode == 0);			\
 } while(0)
 
 #ifdef UNIV_DEBUG
@@ -838,6 +815,13 @@ public:
 
 	Transitions to COMMITTED are protected by trx_t::mutex. */
 	trx_state_t	state;
+#ifdef WITH_WSREP
+	/** whether wsrep_on(mysql_thd) held at the start of transaction */
+	bool		wsrep;
+	bool is_wsrep() const { return UNIV_UNLIKELY(wsrep); }
+#else /* WITH_WSREP */
+	bool is_wsrep() const { return false; }
+#endif /* WITH_WSREP */
 
 	ReadView	read_view;	/*!< consistent read view used in the
 					transaction, or NULL if not yet set */
@@ -874,7 +858,8 @@ public:
 					the coordinator using the XA API, and
 					is set to false  after commit or
 					rollback. */
-	unsigned	active_commit_ordered:1;/* 1 if owns prepare mutex */
+	/** whether this is holding the prepare mutex */
+	bool		active_commit_ordered;
 	/*------------------------------*/
 	bool		check_unique_secondary;
 					/*!< normally TRUE, but if the user
@@ -1144,6 +1129,9 @@ public:
     my_atomic_add32_explicit(&n_ref, -1, MY_MEMORY_ORDER_RELAXED);
     ut_ad(old_n_ref > 0);
   }
+
+  /** Free the memory to trx_pools */
+  void free();
 
 
 private:

@@ -79,7 +79,7 @@ create or replace view vt12 as select * from t1 cross join t2;
 select * from vt12;
 a	b
 1	2
-create or replace view vt12 as select * from t1 for system_time as of timestamp ('0-0-0') cross join t2;
+create or replace view vt12 as select * from t1 for system_time as of timestamp ('1970-01-01 00:00') cross join t2;
 select * from vt12;
 a	b
 # VIEW improvements [tempesta-tech/mariadb#183]
@@ -146,7 +146,7 @@ i
 create or replace view v1 as select * from t1 for system_time as of date_sub(now(), interval 6 second);
 show create view v1;
 View	Create View	character_set_client	collation_connection
-v1	CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v1` AS select `t1`.`i` AS `i` from `t1` FOR SYSTEM_TIME AS OF current_timestamp() - interval 6 second	latin1	latin1_swedish_ci
+v1	CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v1` AS select `t1`.`i` AS `i` from `t1` FOR SYSTEM_TIME AS OF TIMESTAMP current_timestamp() - interval 6 second	latin1	latin1_swedish_ci
 drop view v1, vt1, vt12;
 drop tables t1, t3;
 #
@@ -160,6 +160,7 @@ period for system_time (row_start, row_end)
 ) with system versioning;
 insert into t1 values (1), (2);
 create or replace view v1 as select * from t1 where x > 1;
+# update, delete
 update v1 set x= x + 1;
 select *, check_row(row_start, row_end) from t1 for system_time all order by x;
 x	check_row(row_start, row_end)
@@ -211,5 +212,81 @@ x	check_row(row_start, row_end)
 1	CURRENT ROW
 2	HISTORICAL ROW
 3	HISTORICAL ROW
+# replace
+create or replace table t1 (
+x int primary key, y int,
+row_start SYS_DATATYPE as row start invisible,
+row_end SYS_DATATYPE as row end invisible,
+period for system_time (row_start, row_end)
+) with system versioning;
+insert into t1 values (1, 0), (2, 0);
+create or replace view v1 as select * from t1 where x > 1;
+replace v1 values (1, 1);
+replace v1 values (2, 1);
+replace v1 values (3, 1);
+# REPLACE ignores VIEW condition because itself doesn't use WHERE
+select *, check_row(row_start, row_end) from t1 for system_time all order by x, row_end;
+x	y	check_row(row_start, row_end)
+1	0	HISTORICAL ROW
+1	1	CURRENT ROW
+2	0	HISTORICAL ROW
+2	1	CURRENT ROW
+3	1	CURRENT ROW
+# insert-select, on duplicate key
+insert v1 select * from t1 where x = 1 on duplicate key update x = v1.x - 1;
+select *, check_row(row_start, row_end) from t1 for system_time all order by x, row_end;
+x	y	check_row(row_start, row_end)
+0	1	CURRENT ROW
+1	0	HISTORICAL ROW
+1	1	HISTORICAL ROW
+2	0	HISTORICAL ROW
+2	1	CURRENT ROW
+3	1	CURRENT ROW
 drop view v1, v2;
 drop tables t1, t2;
+#
+# MDEV-21146 Assertion `m_lock_type == 2' in handler::ha_drop_table upon LOAD DATA
+#
+create table t1 (a int);
+create view v1 as select * from t1;
+create or replace table t1 (b int) with system versioning;
+load data infile 'xx' into table v1;
+ERROR HY000: View 'test.v1' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them
+drop view v1;
+drop table t1;
+#
+# MDEV-21155 Assertion with versioned table upon DELETE from view of view after replacing first view
+#
+create table t1 (a int);
+insert into t1 values (1);
+create table t2 (
+b int,
+row_start SYS_DATATYPE as row start invisible,
+row_end SYS_DATATYPE as row end invisible,
+period for system_time (row_start, row_end)
+) with system versioning;
+insert into t2 values (2);
+create view v1 as select * from t1;
+create view v2 as select * from v1;
+create or replace view v1 as select * from t2;
+delete from v2;
+select * from t1;
+a
+1
+select *, check_row(row_start, row_end) from t2 for system_time all;
+b	check_row(row_start, row_end)
+2	HISTORICAL ROW
+drop view v2;
+drop view v1;
+drop table t1, t2;
+#
+# MDEV-23779 Error upon querying the view, that selecting from versioned table with partitions
+#
+create table t1 (i int) with system versioning
+partition by system_time (partition p0 history, partition pn current);
+create view v1 as select * from t1 partition (pn);
+show create view v1;
+View	Create View	character_set_client	collation_connection
+v1	CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v1` AS select `t1`.`i` AS `i` from `t1` PARTITION (`pn`)	latin1	latin1_swedish_ci
+drop view v1;
+drop table t1;

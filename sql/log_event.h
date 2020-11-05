@@ -455,7 +455,7 @@ class String;
 /**
    @def LOG_EVENT_ARTIFICIAL_F
    
-   Artificial events are created arbitarily and not written to binary
+   Artificial events are created arbitrarily and not written to binary
    log
 
    These events should not update the master log position when slave
@@ -889,6 +889,7 @@ typedef struct st_print_event_info
    */
   IO_CACHE head_cache;
   IO_CACHE body_cache;
+  IO_CACHE tail_cache;
 #ifdef WHEN_FLASHBACK_REVIEW_READY
   /* Storing the SQL for reviewing */
   IO_CACHE review_sql_cache;
@@ -899,6 +900,7 @@ typedef struct st_print_event_info
   ~st_print_event_info() {
     close_cached_file(&head_cache);
     close_cached_file(&body_cache);
+    close_cached_file(&tail_cache);
 #ifdef WHEN_FLASHBACK_REVIEW_READY
     close_cached_file(&review_sql_cache);
 #endif
@@ -962,13 +964,13 @@ private:
 };
 
 /**
-  the struct aggregates two paramenters that identify an event
+  the struct aggregates two parameters that identify an event
   uniquely in scope of communication of a particular master and slave couple.
   I.e there can not be 2 events from the same staying connected master which
   have the same coordinates.
   @note
   Such identifier is not yet unique generally as the event originating master
-  is resetable. Also the crashed master can be replaced with some other.
+  is resettable. Also the crashed master can be replaced with some other.
 */
 typedef struct event_coordinates
 {
@@ -2223,7 +2225,15 @@ public:
  ****************************************************************************/
 struct sql_ex_info
 {
-  sql_ex_info() {}                            /* Remove gcc warning */
+  sql_ex_info():
+    cached_new_format(-1),
+    field_term_len(0),
+    enclosed_len(0),
+    line_term_len(0),
+    line_start_len(0),
+    escaped_len(0),
+    empty_flags(0)
+  {}                            /* Remove gcc warning */
   const char* field_term;
   const char* enclosed;
   const char* line_term;
@@ -2752,7 +2762,7 @@ public:
   uint8 number_of_event_types;
   /* 
      The list of post-headers' lengths followed 
-     by the checksum alg decription byte
+     by the checksum alg description byte
   */
   uint8 *post_header_len;
   struct master_version_split {
@@ -3092,7 +3102,7 @@ public:
   */
   bool is_deferred() { return deferred; }
   /*
-    In case of the deffered applying the variable instance is flagged
+    In case of the deferred applying the variable instance is flagged
     and the parsing time query id is stored to be used at applying time.
   */
   void set_deferred(query_id_t qid) { deferred= true; query_id= qid; }
@@ -3590,7 +3600,7 @@ public:
   bool write_data_header();
   bool write_data_body();
   /*
-    Cut out Create_file extentions and
+    Cut out Create_file extensions and
     write it as Load event - used on the slave
   */
   bool write_base();
@@ -4980,7 +4990,7 @@ private:
 /**
   @class Incident_log_event
 
-   Class representing an incident, an occurance out of the ordinary,
+   Class representing an incident, an occurence out of the ordinary,
    that happened on the master.
 
    The event is used to inform the slave that something out of the
@@ -5024,7 +5034,7 @@ public:
     m_message.str= NULL;                    /* Just as a precaution */
     m_message.length= 0;
     set_direct_logging();
-    /* Replicate the incident irregardless of @@skip_replication. */
+    /* Replicate the incident regardless of @@skip_replication. */
     flags&= ~LOG_EVENT_SKIP_REPLICATION_F;
     DBUG_VOID_RETURN;
   }
@@ -5045,7 +5055,7 @@ public:
     strmake(m_message.str, msg->str, msg->length);
     m_message.length= msg->length;
     set_direct_logging();
-    /* Replicate the incident irregardless of @@skip_replication. */
+    /* Replicate the incident regardless of @@skip_replication. */
     flags&= ~LOG_EVENT_SKIP_REPLICATION_F;
     DBUG_VOID_RETURN;
   }
@@ -5211,6 +5221,9 @@ bool event_that_should_be_ignored(const char *buf);
 bool event_checksum_test(uchar *buf, ulong event_len, enum_binlog_checksum_alg alg);
 enum enum_binlog_checksum_alg get_checksum_alg(const char* buf, ulong len);
 extern TYPELIB binlog_checksum_typelib;
+#ifdef WITH_WSREP
+enum Log_event_type wsrep_peak_event(rpl_group_info *rgi, ulonglong* event_size);
+#endif /* WITH_WSREP */
 
 /**
   @} (end of group Replication)

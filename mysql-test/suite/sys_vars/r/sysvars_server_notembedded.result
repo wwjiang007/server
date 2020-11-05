@@ -2046,7 +2046,7 @@ VARIABLE_NAME	MAX_SORT_LENGTH
 VARIABLE_SCOPE	SESSION
 VARIABLE_TYPE	BIGINT UNSIGNED
 VARIABLE_COMMENT	The number of bytes to use when sorting BLOB or TEXT values (only the first max_sort_length bytes of each value are used; the rest are ignored)
-NUMERIC_MIN_VALUE	4
+NUMERIC_MIN_VALUE	8
 NUMERIC_MAX_VALUE	8388608
 NUMERIC_BLOCK_SIZE	1
 ENUM_VALUE_LIST	NULL
@@ -2417,7 +2417,7 @@ VARIABLE_SCOPE	GLOBAL
 VARIABLE_TYPE	BIGINT
 VARIABLE_COMMENT	Size of the statement digest. Use 0 to disable, -1 for automated sizing.
 NUMERIC_MIN_VALUE	-1
-NUMERIC_MAX_VALUE	200
+NUMERIC_MAX_VALUE	1048576
 NUMERIC_BLOCK_SIZE	1
 ENUM_VALUE_LIST	NULL
 READ_ONLY	YES
@@ -3355,7 +3355,7 @@ COMMAND_LINE_ARGUMENT	REQUIRED
 VARIABLE_NAME	SESSION_TRACK_TRANSACTION_INFO
 VARIABLE_SCOPE	SESSION
 VARIABLE_TYPE	ENUM
-VARIABLE_COMMENT	Track changes to the transaction attributes. OFF to disable; STATE to track just transaction state (Is there an active transaction? Does it have any data? etc.); CHARACTERISTICS to track transaction state and report all statements needed to start a transaction withthe same characteristics (isolation level, read only/read write,snapshot - but not any work done / data modified within the transaction).
+VARIABLE_COMMENT	Track changes to the transaction attributes. OFF to disable; STATE to track just transaction state (Is there an active transaction? Does it have any data? etc.); CHARACTERISTICS to track transaction state and report all statements needed to start a transaction with the same characteristics (isolation level, read only/read write,snapshot - but not any work done / data modified within the transaction).
 NUMERIC_MIN_VALUE	NULL
 NUMERIC_MAX_VALUE	NULL
 NUMERIC_BLOCK_SIZE	NULL
@@ -4015,7 +4015,7 @@ COMMAND_LINE_ARGUMENT	REQUIRED
 VARIABLE_NAME	TCP_KEEPALIVE_TIME
 VARIABLE_SCOPE	GLOBAL
 VARIABLE_TYPE	INT
-VARIABLE_COMMENT	Timeout, in milliseconds, with no activity until the first TCP keep-alive packet is sent.If set to 0, system dependent default is used.
+VARIABLE_COMMENT	Timeout, in seconds, with no activity until the first TCP keep-alive packet is sent.If set to 0, system dependent default is used.
 NUMERIC_MIN_VALUE	0
 NUMERIC_MAX_VALUE	2147483
 NUMERIC_BLOCK_SIZE	1

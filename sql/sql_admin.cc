@@ -91,10 +91,10 @@ static int send_check_errmsg(THD *thd, TABLE_LIST* table,
 static int prepare_for_repair(THD *thd, TABLE_LIST *table_list,
 			      HA_CHECK_OPT *check_opt)
 {
-  int error= 0;
+  int error= 0, create_error= 0;
   TABLE tmp_table, *table;
   TABLE_LIST *pos_in_locked_tables= 0;
-  TABLE_SHARE *share;
+  TABLE_SHARE *share= 0;
   bool has_mdl_lock= FALSE;
   char from[FN_REFLEN],tmp[FN_REFLEN+32];
   const char **ext;
@@ -175,7 +175,7 @@ static int prepare_for_repair(THD *thd, TABLE_LIST *table_list,
   /*
     Check if this is a table type that stores index and data separately,
     like ISAM or MyISAM. We assume fixed order of engine file name
-    extentions array. First element of engine file name extentions array
+    extensions array. First element of engine file name extensions array
     is meta/index file extention. Second element - data file extention. 
   */
   ext= table->file->bas_ext();
@@ -207,6 +207,23 @@ static int prepare_for_repair(THD *thd, TABLE_LIST *table_list,
                               HA_EXTRA_NOT_USED, NULL);
     table_list->table= 0;
   }
+  else
+  {
+    /*
+      Table open failed, maybe because we run out of memory.
+      Close all open tables and relaese all MDL locks
+    */
+#if MYSQL_VERSION < 100500
+    tdc_remove_table(thd, TDC_RT_REMOVE_UNUSED,
+                     table->s->db.str, table->s->table_name.str,
+                     TRUE);
+#else
+    tdc_release_share(share);
+    share->tdc->flush(thd, true);
+    share= 0;
+#endif
+  }
+
   /*
     After this point we have an exclusive metadata lock on our table
     in both cases when table was successfully open in mysql_admin_table()
@@ -220,11 +237,8 @@ static int prepare_for_repair(THD *thd, TABLE_LIST *table_list,
     goto end;
   }
   if (dd_recreate_table(thd, table_list->db.str, table_list->table_name.str))
-  {
-    error= send_check_errmsg(thd, table_list, "repair",
-			     "Failed generating table from .frm file");
-    goto end;
-  }
+    create_error= send_check_errmsg(thd, table_list, "repair",
+                                    "Failed generating table from .frm file");
   /*
     'FALSE' for 'using_transactions' means don't postpone
     invalidation till the end of a transaction, but do it
@@ -237,6 +251,8 @@ static int prepare_for_repair(THD *thd, TABLE_LIST *table_list,
 			     "Failed restoring .MYD file");
     goto end;
   }
+  if (create_error)
+    goto end;
 
   if (thd->locked_tables_list.locked_tables())
   {
@@ -264,7 +280,8 @@ end:
   if (table == &tmp_table)
   {
     closefrm(table);
-    tdc_release_share(table->s);
+    if (share)
+      tdc_release_share(share);
   }
   /* In case of a temporary table there will be no metadata lock. */
   if (unlikely(error) && has_mdl_lock)
@@ -592,6 +609,12 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
 #endif
     DBUG_PRINT("admin", ("table: %p", table->table));
 
+    if (table->schema_table)
+    {
+      result_code= HA_ADMIN_NOT_IMPLEMENTED;
+      goto send_result;
+    }
+
     if (prepare_func)
     {
       DBUG_PRINT("admin", ("calling prepare_func"));
@@ -647,12 +670,6 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
     {
       DBUG_PRINT("admin", ("calling view_operator_func"));
       result_code= (*view_operator_func)(thd, table, check_opt);
-      goto send_result;
-    }
-
-    if (table->schema_table)
-    {
-      result_code= HA_ADMIN_NOT_IMPLEMENTED;
       goto send_result;
     }
 
@@ -768,35 +785,20 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
       {
         compl_result_code= result_code= HA_ADMIN_INVALID;
       }
+
+      /*
+        The check for ALTER_PARTITION_ADMIN implements this logic:
+        do not collect EITS STATS for this syntax:
+          ALTER TABLE ... ANALYZE PARTITION p
+        EITS statistics is global (not per-partition). Collecting global stats
+        is much more expensive processing just one partition, so the most
+        appropriate action is to just not collect EITS stats for this command.
+      */
       collect_eis=
         (table->table->s->table_category == TABLE_CATEGORY_USER &&
+        !(lex->alter_info.flags & ALTER_PARTITION_ADMIN) &&
          (get_use_stat_tables_mode(thd) > NEVER ||
           lex->with_persistent_for_clause));
-
-
-      if (!lex->index_list)
-      {
-        tab->keys_in_use_for_query.init(tab->s->keys);
-      }
-      else
-      {
-        int pos;
-        LEX_STRING *index_name;
-        List_iterator_fast<LEX_STRING> it(*lex->index_list);
-   
-        tab->keys_in_use_for_query.clear_all();  
-        while ((index_name= it++))
-	{
-          if (tab->s->keynames.type_names == 0 ||
-              (pos= find_type(&tab->s->keynames, index_name->str,
-                              index_name->length, 1)) <= 0)
-          {
-            compl_result_code= result_code= HA_ADMIN_INVALID;
-            break;
-          }
-          tab->keys_in_use_for_query.set_bit(--pos);
-        }  
-      }
     }
 
     if (result_code == HA_ADMIN_OK)
@@ -880,6 +882,27 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
                                   column_name->str);
           }
           tab->file->column_bitmaps_signal();
+        }
+        if (!lex->index_list)
+          tab->keys_in_use_for_query.init(tab->s->keys);
+        else
+        {
+          int pos;
+          LEX_STRING *index_name;
+          List_iterator_fast<LEX_STRING> it(*lex->index_list);
+
+          tab->keys_in_use_for_query.clear_all();
+          while ((index_name= it++))
+          {
+            if (tab->s->keynames.type_names == 0 ||
+                (pos= find_type(&tab->s->keynames, index_name->str,
+                                index_name->length, 1)) <= 0)
+            {
+              compl_result_code= result_code= HA_ADMIN_INVALID;
+              break;
+            }
+            tab->keys_in_use_for_query.set_bit(--pos);
+          }
         }
         if (!(compl_result_code=
               alloc_statistics_for_table(thd, table->table)) &&
@@ -1094,7 +1117,7 @@ send_result_message:
         }
         /* Make sure this table instance is not reused after the operation. */
         if (table->table)
-          table->table->m_needs_reopen= true;
+          table->table->mark_table_for_reopen();
       }
       result_code= result_code ? HA_ADMIN_FAILED : HA_ADMIN_OK;
       table->next_local= save_next_local;
@@ -1219,7 +1242,7 @@ err:
     trans_rollback(thd);
   if (table && table->table)
   {
-    table->table->m_needs_reopen= true;
+    table->table->mark_table_for_reopen();
     table->table= 0;
   }
   close_thread_tables(thd);			// Shouldn't be needed

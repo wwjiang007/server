@@ -1,5 +1,5 @@
-/* Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB Corporation
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2020, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -203,6 +203,7 @@ init_lex_with_single_table(THD *thd, TABLE *table, LEX *lex)
   table->map= 1; //To ensure correct calculation of const item
   table_list->table= table;
   table_list->cacheable_table= false;
+  lex->create_last_non_select_table= table_list;
   return FALSE;
 }
 
@@ -236,6 +237,7 @@ void
 st_parsing_options::reset()
 {
   allows_variable= TRUE;
+  lookup_keywords_after_qualifier= false;
 }
 
 
@@ -793,7 +795,7 @@ void lex_end_stage1(LEX *lex)
   }
   else
   {
-    delete lex->sphead;
+    sp_head::destroy(lex->sphead);
     lex->sphead= NULL;
   }
 
@@ -1240,17 +1242,27 @@ static inline uint int_token(const char *str,uint length)
 */
 bool Lex_input_stream::consume_comment(int remaining_recursions_permitted)
 {
+  // only one level of nested comments are allowed
+  DBUG_ASSERT(remaining_recursions_permitted == 0 ||
+              remaining_recursions_permitted == 1);
   uchar c;
   while (!eof())
   {
     c= yyGet();
 
-    if (remaining_recursions_permitted > 0)
+    if (remaining_recursions_permitted == 1)
     {
       if ((c == '/') && (yyPeek() == '*'))
       {
-        yySkip(); // Eat asterisk
-        consume_comment(remaining_recursions_permitted - 1);
+        yyUnput('(');  // Replace nested "/*..." with "(*..."
+        yySkip();      // and skip "("
+
+        yySkip(); /* Eat asterisk */
+        if (consume_comment(0))
+          return true;
+
+        yyUnput(')');  // Replace "...*/" with "...*)"
+        yySkip();      // and skip ")"
         continue;
       }
     }
@@ -1528,7 +1540,10 @@ int Lex_input_stream::lex_one_token(YYSTYPE *yylval, THD *thd)
       yylval->lex_str.str= (char*) get_ptr();
       yylval->lex_str.length= 1;
       c= yyGet();                          // should be '.'
-      next_state= MY_LEX_IDENT_START;      // Next is ident (not keyword)
+      if (lex->parsing_options.lookup_keywords_after_qualifier)
+        next_state= MY_LEX_IDENT_OR_KEYWORD;
+      else
+        next_state= MY_LEX_IDENT_START;    // Next is ident (not keyword)
       if (!ident_map[(uchar) yyPeek()])    // Probably ` or "
         next_state= MY_LEX_START;
       return((int) c);
@@ -2191,8 +2206,17 @@ int Lex_input_stream::scan_ident_delimited(THD *thd,
   uchar c, quote_char= m_tok_start[0];
   DBUG_ASSERT(m_ptr == m_tok_start + 1);
 
-  while ((c= yyGet()))
+  for ( ; ; )
   {
+    if (!(c= yyGet()))
+    {
+      /*
+        End-of-query or straight 0x00 inside a delimited identifier.
+        Return the quote character, to have the parser fail on syntax error.
+      */
+      m_ptr= (char *) m_tok_start + 1;
+      return quote_char;
+    }
     int var_length= my_charlen(cs, get_ptr() - 1, get_end_of_query());
     if (var_length == 1)
     {
@@ -2333,6 +2357,7 @@ void st_select_lex::init_query()
   n_sum_items= 0;
   n_child_sum_items= 0;
   hidden_bit_fields= 0;
+  fields_in_window_functions= 0;
   subquery_in_having= explicit_limit= 0;
   is_item_list_lookup= 0;
   changed_elements= 0;
@@ -2877,7 +2902,8 @@ bool st_select_lex::setup_ref_array(THD *thd, uint order_group_num)
                        select_n_having_items +
                        select_n_where_fields +
                        order_group_num +
-                       hidden_bit_fields) * 5;
+                       hidden_bit_fields +
+                       fields_in_window_functions) * 5;
   if (!ref_pointer_array.is_null())
   {
     /*
@@ -3049,13 +3075,13 @@ void LEX::cleanup_lex_after_parse_error(THD *thd)
       DBUG_ASSERT(pkg == pkg->m_top_level_lex->sphead);
       pkg->restore_thd_mem_root(thd);
       LEX *top= pkg->m_top_level_lex;
-      delete pkg;
+      sp_package::destroy(pkg);
       thd->lex= top;
       thd->lex->sphead= NULL;
     }
     else
     {
-      delete thd->lex->sphead;
+      sp_head::destroy(thd->lex->sphead);
       thd->lex->sphead= NULL;
     }
   }
@@ -3286,21 +3312,21 @@ bool LEX::can_not_use_merged()
   }
 }
 
-/*
-  Detect that we need only table structure of derived table/view
+/**
+  Detect that we need only table structure of derived table/view.
 
-  SYNOPSIS
-    only_view_structure()
+  Also used by I_S tables (@see create_schema_table) to detect that
+  they need a full table structure and cannot optimize unused columns away
 
-  RETURN
-    TRUE yes, we need only structure
-    FALSE no, we need data
+  @retval TRUE yes, we need only structure
+  @retval FALSE no, we need data
 */
 
 bool LEX::only_view_structure()
 {
   switch (sql_command) {
   case SQLCOM_SHOW_CREATE:
+  case SQLCOM_CHECKSUM:
   case SQLCOM_SHOW_TABLES:
   case SQLCOM_SHOW_FIELDS:
   case SQLCOM_REVOKE_ALL:
@@ -3308,6 +3334,8 @@ bool LEX::only_view_structure()
   case SQLCOM_GRANT:
   case SQLCOM_CREATE_VIEW:
     return TRUE;
+  case SQLCOM_CREATE_TABLE:
+    return create_info.like();
   default:
     return FALSE;
   }
@@ -4071,7 +4099,8 @@ bool st_select_lex::optimize_unflattened_subqueries(bool const_only)
           sl->options|= SELECT_DESCRIBE;
           inner_join->select_options|= SELECT_DESCRIBE;
         }
-        res= inner_join->optimize();
+        if ((res= inner_join->optimize()))
+          return TRUE;
         if (!inner_join->cleaned)
           sl->update_used_tables();
         sl->update_correlated_cache();
@@ -4480,7 +4509,7 @@ void SELECT_LEX::update_used_tables()
   }
 
   Item *item;
-  List_iterator_fast<Item> it(join->fields_list);
+  List_iterator_fast<Item> it(join->all_fields);
   select_list_tables= 0;
   while ((item= it++))
   {
@@ -6190,7 +6219,7 @@ sp_head *LEX::make_sp_head(THD *thd, const sp_name *name,
   sp_head *sp;
 
   /* Order is important here: new - reset - init */
-  if (likely((sp= new sp_head(package, sph))))
+  if (likely((sp= sp_head::create(package, sph))))
   {
     sp->reset_thd_mem_root(thd);
     sp->init(this);
@@ -7065,7 +7094,8 @@ Item *LEX::create_item_limit(THD *thd, const Lex_ident_cli_st *ca)
   if (unlikely(!(item= new (thd->mem_root)
                  Item_splocal(thd, rh, &sa,
                               spv->offset, spv->type_handler(),
-                              pos.pos(), pos.length()))))
+                              clone_spec_offset ? 0 : pos.pos(),
+                              clone_spec_offset ? 0 : pos.length()))))
     return NULL;
 #ifdef DBUG_ASSERT_EXISTS
   item->m_sp= sphead;
@@ -7164,14 +7194,15 @@ Item *LEX::create_item_ident_sp(THD *thd, Lex_ident_sys_st *name,
     }
 
     Query_fragment pos(thd, sphead, start, end);
+    uint f_pos= clone_spec_offset ? 0 : pos.pos();
+    uint f_length= clone_spec_offset ? 0 : pos.length();
     Item_splocal *splocal= spv->field_def.is_column_type_ref() ?
       new (thd->mem_root) Item_splocal_with_delayed_data_type(thd, rh, name,
                                                               spv->offset,
-                                                              pos.pos(),
-                                                              pos.length()) :
+                                                              f_pos, f_length) :
       new (thd->mem_root) Item_splocal(thd, rh, name,
                                        spv->offset, spv->type_handler(),
-                                       pos.pos(), pos.length());
+                                       f_pos, f_length);
     if (unlikely(splocal == NULL))
       return NULL;
 #ifdef DBUG_ASSERT_EXISTS
@@ -7829,7 +7860,7 @@ sp_package *LEX::create_package_start(THD *thd,
       return 0;
     }
   }
-  if (unlikely(!(pkg= new sp_package(this, name_arg, sph))))
+  if (unlikely(!(pkg= sp_package::create(this, name_arg, sph))))
     return NULL;
   pkg->reset_thd_mem_root(thd);
   pkg->init(this);
@@ -8270,4 +8301,32 @@ bool LEX::tvc_finalize_derived()
     return true;
   current_select->linkage= DERIVED_TABLE_TYPE;
   return tvc_finalize();
+}
+
+
+bool LEX::map_data_type(const Lex_ident_sys_st &schema_name,
+                        Lex_field_type_st *type) const
+{
+  const Schema *schema= schema_name.str ?
+                        Schema::find_by_name(schema_name) :
+                        Schema::find_implied(thd);
+  if (!schema)
+  {
+    char buf[128];
+    const Name type_name= type->type_handler()->name();
+    my_snprintf(buf, sizeof(buf), "%.*s.%.*s",
+                (int) schema_name.length, schema_name.str,
+                (int) type_name.length(), type_name.ptr());
+#if MYSQL_VERSION_ID > 100500
+#error Please remove the old code
+    my_error(ER_UNKNOWN_DATA_TYPE, MYF(0), buf);
+#else
+    my_printf_error(ER_UNKNOWN_ERROR, "Unknown data type: '%-.64s'",
+                    MYF(0), buf);
+#endif
+    return true;
+  }
+  const Type_handler *mapped= schema->map_data_type(thd, type->type_handler());
+  type->set_handler(mapped);
+  return false;
 }

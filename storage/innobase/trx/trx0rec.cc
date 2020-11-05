@@ -1,7 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 1996, 2019, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -42,8 +42,7 @@ Created 3/26/1996 Heikki Tuuri
 /** The search tuple corresponding to TRX_UNDO_INSERT_METADATA */
 const dtuple_t trx_undo_metadata = {
 	REC_INFO_METADATA, 0, 0,
-	NULL, 0, NULL,
-	UT_LIST_NODE_T(dtuple_t)()
+	NULL, 0, NULL
 #ifdef UNIV_DEBUG
 	, DATA_TUPLE_MAGIC_N
 #endif /* UNIV_DEBUG */
@@ -868,7 +867,7 @@ trx_undo_page_report_modify(
 					delete marking is done */
 	const rec_t*	rec,		/*!< in: clustered index record which
 					has NOT yet been modified */
-	const ulint*	offsets,	/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec, index) */
 	const upd_t*	update,		/*!< in: update vector which tells the
 					columns to be updated; in the case of
 					a delete, this should be set to NULL */
@@ -1916,7 +1915,6 @@ dberr_t trx_undo_report_rename(trx_t* trx, const dict_table_t* table)
 
 			if (ulint offset = trx_undo_page_report_rename(
 				    trx, table, block, &mtr)) {
-				undo->withdraw_clock = buf_withdraw_clock;
 				undo->top_page_no = undo->last_page_no;
 				undo->top_offset  = offset;
 				undo->top_undo_no = trx->undo_no++;
@@ -1935,10 +1933,9 @@ dberr_t trx_undo_report_rename(trx_t* trx, const dict_table_t* table)
 				}
 			}
 		}
-
-		mtr.commit();
 	}
 
+	mtr.commit();
 	return err;
 }
 
@@ -1967,7 +1964,7 @@ trx_undo_report_row_operation(
 	const rec_t*	rec,		/*!< in: case of an update or delete
 					marking, the record in the clustered
 					index; NULL if insert */
-	const ulint*	offsets,	/*!< in: rec_get_offsets(rec) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec) */
 	roll_ptr_t*	roll_ptr)	/*!< out: DB_ROLL_PTR to the
 					undo log record */
 {
@@ -2057,7 +2054,6 @@ trx_undo_report_row_operation(
 			mtr_commit(&mtr);
 		} else {
 			/* Success */
-			undo->withdraw_clock = buf_withdraw_clock;
 			mtr_commit(&mtr);
 
 			undo->top_page_no = undo_block->page.id.page_no();
@@ -2225,7 +2221,7 @@ trx_undo_prev_version_build(
 				index_rec page and purge_view */
 	const rec_t*	rec,	/*!< in: version of a clustered index record */
 	dict_index_t*	index,	/*!< in: clustered index */
-	ulint*		offsets,/*!< in/out: rec_get_offsets(rec, index) */
+	rec_offs*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
 	mem_heap_t*	heap,	/*!< in: memory heap from which the memory
 				needed is allocated */
 	rec_t**		old_vers,/*!< out, own: previous version, or NULL if
@@ -2335,8 +2331,6 @@ trx_undo_prev_version_build(
 	ut_a(ptr);
 
 	if (row_upd_changes_field_size_or_external(index, offsets, update)) {
-		ulint	n_ext;
-
 		/* We should confirm the existence of disowned external data,
 		if the previous version record is delete marked. If the trx_id
 		of the previous record is seen by purge view, we should treat
@@ -2377,13 +2371,18 @@ trx_undo_prev_version_build(
 		those fields that update updates to become externally stored
 		fields. Store the info: */
 
-		entry = row_rec_to_index_entry(
-			rec, index, offsets, &n_ext, heap);
-		n_ext += btr_push_update_extern_fields(entry, update, heap);
+		entry = row_rec_to_index_entry(rec, index, offsets, heap);
 		/* The page containing the clustered index record
 		corresponding to entry is latched in mtr.  Thus the
 		following call is safe. */
-		row_upd_index_replace_new_col_vals(entry, index, update, heap);
+		if (!row_upd_index_replace_new_col_vals(entry, *index, update,
+							heap)) {
+			ut_a(v_status & TRX_UNDO_PREV_IN_PURGE);
+			return false;
+		}
+
+		/* Get number of externally stored columns in updated record */
+		const ulint n_ext = dtuple_get_n_ext(entry);
 
 		buf = static_cast<byte*>(mem_heap_alloc(
 			heap, rec_get_converted_size(index, entry, n_ext)));
@@ -2407,8 +2406,10 @@ trx_undo_prev_version_build(
 	}
 
 #if defined UNIV_DEBUG || defined UNIV_BLOB_LIGHT_DEBUG
+	rec_offs offsets_dbg[REC_OFFS_NORMAL_SIZE];
+	rec_offs_init(offsets_dbg);
 	ut_a(!rec_offs_any_null_extern(
-		*old_vers, rec_get_offsets(*old_vers, index, NULL, true,
+		*old_vers, rec_get_offsets(*old_vers, index, offsets_dbg, true,
 					   ULINT_UNDEFINED, &heap)));
 #endif // defined UNIV_DEBUG || defined UNIV_BLOB_LIGHT_DEBUG
 
